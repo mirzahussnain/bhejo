@@ -72,9 +72,16 @@ export function getCameraErrorStatus(error: unknown): CameraStatus {
   return "error";
 }
 
-export function captureVideoFrame(video: HTMLVideoElement) {
+export interface CapturedVideoFrame {
+  readonly canvas: HTMLCanvasElement;
+  readonly sourceDimensions: { readonly width: number; readonly height: number };
+}
+
+export function captureVideoFrame(
+  video: HTMLVideoElement,
+): CapturedVideoFrame {
   if (!video.videoWidth || !video.videoHeight) {
-    return Promise.reject(new Error("The camera frame is not ready."));
+    throw new Error("The camera frame is not ready.");
   }
 
   const canvas = document.createElement("canvas");
@@ -83,24 +90,13 @@ export function captureVideoFrame(video: HTMLVideoElement) {
 
   const context = canvas.getContext("2d");
   if (!context) {
-    return Promise.reject(new Error("Canvas is not available."));
+    throw new Error("Canvas is not available.");
   }
 
   context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-  return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (blob) {
-          resolve(blob);
-          return;
-        }
-
-        reject(new Error("The camera frame could not be captured."));
-      },
-      "image/jpeg",
-      0.92,
-    );
-  });
+  return {
+    canvas,
+    sourceDimensions: { width: video.videoWidth, height: video.videoHeight },
+  };
 }
-

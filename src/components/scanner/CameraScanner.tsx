@@ -13,6 +13,7 @@ import {
 import { useFrameSampler } from "@/hooks/useFrameSampler";
 import { captureVideoFrame } from "@/lib/camera/camera";
 import { CaptureController } from "@/lib/capture/capture-controller";
+import { processCapturedFrame } from "@/lib/capture-processing/processing-pipeline";
 import type { DocumentDetection } from "@/lib/detection/document-detection";
 import {
   analyseDocumentQuality,
@@ -34,6 +35,13 @@ interface LiveAnalysis {
   readonly analysisDimensions: { readonly width: number; readonly height: number } | null;
 }
 
+interface ProcessedScan {
+  readonly url: string;
+  readonly correctionFallback: boolean;
+}
+
+type ScanProcessingState = "scanning" | "processing" | "preview" | "error";
+
 const INITIAL_LIVE_ANALYSIS: LiveAnalysis = {
   detection: null,
   quality: null,
@@ -45,18 +53,23 @@ const AUTO_CAPTURE_DELAY_MS = 180;
 
 export function CameraScanner() {
   const { status, videoRef, startCamera, stopCamera } = useCamera();
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [processedScan, setProcessedScan] = useState<ProcessedScan | null>(null);
+  const [processingState, setProcessingState] =
+    useState<ScanProcessingState>("scanning");
+  const [scanAccepted, setScanAccepted] = useState(false);
   const [capturePending, setCapturePending] = useState(false);
   const [captureFailed, setCaptureFailed] = useState(false);
   const [liveAnalysis, setLiveAnalysis] =
     useState<LiveAnalysis>(INITIAL_LIVE_ANALYSIS);
   const previewUrlRef = useRef<string | null>(null);
+  const liveAnalysisRef = useRef<LiveAnalysis>(INITIAL_LIVE_ANALYSIS);
   const mountedRef = useRef(true);
-  const restartOnLiveViewRef = useRef(false);
+  const operationIdRef = useRef(0);
   const captureControllerRef = useRef(new CaptureController());
   const stabilityTrackerRef = useRef(new DocumentStabilityTracker());
   const autoCaptureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const analysisActive = status === "ready" && !previewUrl && !capturePending;
+  const analysisActive =
+    status === "ready" && processingState === "scanning" && !capturePending;
 
   const replacePreviewUrl = useCallback((nextUrl: string | null) => {
     if (previewUrlRef.current) {
@@ -64,7 +77,6 @@ export function CameraScanner() {
     }
 
     previewUrlRef.current = nextUrl;
-    setPreviewUrl(nextUrl);
   }, []);
 
   const clearAutoCaptureTimer = useCallback(() => {
@@ -88,26 +100,44 @@ export function CameraScanner() {
         return;
       }
 
+      const operationId = operationIdRef.current + 1;
+      operationIdRef.current = operationId;
       clearAutoCaptureTimer();
       setCapturePending(true);
       setCaptureFailed(false);
 
       try {
-        const image = await captureVideoFrame(videoRef.current);
-        if (!mountedRef.current) {
+        const capturedFrame = captureVideoFrame(videoRef.current);
+        const { detection, analysisDimensions } = liveAnalysisRef.current;
+        setProcessingState("processing");
+        stopCamera();
+
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const result = await processCapturedFrame({
+          capturedFrame,
+          analysisCorners: detection?.corners ?? null,
+          analysisDimensions,
+        });
+        if (!mountedRef.current || operationId !== operationIdRef.current) {
           return;
         }
 
         controller.completeCapture(performance.now());
-        replacePreviewUrl(URL.createObjectURL(image));
-        stopCamera();
+        const url = URL.createObjectURL(result.image);
+        replacePreviewUrl(url);
+        setProcessedScan({
+          url,
+          correctionFallback: result.correctionFailed,
+        });
+        setScanAccepted(false);
+        setProcessingState("preview");
       } catch {
         controller.failCapture();
-        if (mountedRef.current) {
-          setCaptureFailed(true);
+        if (mountedRef.current && operationId === operationIdRef.current) {
+          setProcessingState("error");
         }
       } finally {
-        if (mountedRef.current) {
+        if (mountedRef.current && operationId === operationIdRef.current) {
           setCapturePending(false);
         }
       }
@@ -131,12 +161,14 @@ export function CameraScanner() {
         qualityAcceptable: quality?.isAcceptable ?? false,
         timestamp: frame.timestamp,
       });
-      setLiveAnalysis({
+      const nextAnalysis = {
         detection,
         quality,
         stability,
         analysisDimensions: { width: frame.width, height: frame.height },
-      });
+      };
+      liveAnalysisRef.current = nextAnalysis;
+      setLiveAnalysis(nextAnalysis);
 
       const decision = captureControllerRef.current.observe(
         {
@@ -174,22 +206,25 @@ export function CameraScanner() {
 
     return () => {
       mountedRef.current = false;
+      operationIdRef.current += 1;
       clearAutoCaptureTimer();
       controller.reset();
       stabilityTracker.reset();
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
       }
     };
   }, [clearAutoCaptureTimer]);
 
   useEffect(() => {
-    if (!analysisActive && !capturePending && !previewUrl) {
+    if (!analysisActive && !capturePending && processingState === "scanning") {
       clearAutoCaptureTimer();
       captureControllerRef.current.reset();
       stabilityTrackerRef.current.reset();
+      liveAnalysisRef.current = INITIAL_LIVE_ANALYSIS;
     }
-  }, [analysisActive, capturePending, clearAutoCaptureTimer, previewUrl]);
+  }, [analysisActive, capturePending, clearAutoCaptureTimer, processingState]);
 
   useEffect(() => {
     const resetForBackgrounding = () => {
@@ -200,6 +235,7 @@ export function CameraScanner() {
       clearAutoCaptureTimer();
       captureControllerRef.current.reset();
       stabilityTrackerRef.current.reset();
+      liveAnalysisRef.current = INITIAL_LIVE_ANALYSIS;
       setLiveAnalysis(INITIAL_LIVE_ANALYSIS);
     };
 
@@ -209,24 +245,24 @@ export function CameraScanner() {
     };
   }, [clearAutoCaptureTimer]);
 
-  useEffect(() => {
-    if (!previewUrl && restartOnLiveViewRef.current) {
-      restartOnLiveViewRef.current = false;
-      void startCamera();
-    }
-  }, [previewUrl, startCamera]);
-
-  const handleRetake = () => {
+  const handleRetake = useCallback(() => {
+    operationIdRef.current += 1;
     clearAutoCaptureTimer();
     captureControllerRef.current.reset();
     stabilityTrackerRef.current.reset();
-    restartOnLiveViewRef.current = true;
-    replacePreviewUrl(null);
+    liveAnalysisRef.current = INITIAL_LIVE_ANALYSIS;
+    setLiveAnalysis(INITIAL_LIVE_ANALYSIS);
+    setProcessedScan(null);
+    setProcessingState("scanning");
+    setScanAccepted(false);
+    setCapturePending(false);
     setCaptureFailed(false);
-  };
+    replacePreviewUrl(null);
+    void startCamera();
+  }, [clearAutoCaptureTimer, replacePreviewUrl, startCamera]);
 
   const displayedAnalysis = analysisActive ? liveAnalysis : INITIAL_LIVE_ANALYSIS;
-  const scannerState: ScannerState = previewUrl
+  const scannerState: ScannerState = processedScan
     ? "preview"
     : deriveScannerState({
         detection: displayedAnalysis.detection,
@@ -235,8 +271,57 @@ export function CameraScanner() {
         capturing: capturePending,
       });
 
-  if (previewUrl) {
-    return <ScanPreview imageUrl={previewUrl} onRetake={handleRetake} />;
+  if (processedScan && processingState === "preview") {
+    return (
+      <ScanPreview
+        imageUrl={processedScan.url}
+        onRetake={handleRetake}
+        onAccept={() => setScanAccepted(true)}
+        accepted={scanAccepted}
+        correctionFallback={processedScan.correctionFallback}
+      />
+    );
+  }
+
+  if (processingState === "processing") {
+    return (
+      <main className="flex h-dvh flex-col items-center justify-center bg-slate-950 px-6 text-center text-white">
+        <span className="size-10 animate-spin rounded-full border-4 border-white/30 border-t-white motion-reduce:animate-none" />
+        <h1 className="mt-6 text-2xl font-semibold tracking-[-0.02em]">
+          Preparing your scan…
+        </h1>
+        <p className="mt-3 max-w-sm text-base leading-6 text-slate-300">
+          Keeping everything on this device.
+        </p>
+        <button
+          type="button"
+          onClick={handleRetake}
+          className="mt-8 min-h-14 rounded-xl border border-slate-500 px-6 text-base font-semibold text-white transition-colors hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white/40"
+        >
+          Cancel and retake
+        </button>
+      </main>
+    );
+  }
+
+  if (processingState === "error") {
+    return (
+      <main className="flex h-dvh flex-col items-center justify-center bg-slate-950 px-6 text-center text-white">
+        <h1 className="text-2xl font-semibold tracking-[-0.02em]">
+          We couldn&apos;t prepare that scan
+        </h1>
+        <p className="mt-3 max-w-sm text-base leading-6 text-slate-300">
+          Please try again with the document clearly in view.
+        </p>
+        <button
+          type="button"
+          onClick={handleRetake}
+          className="mt-8 min-h-14 rounded-xl bg-white px-7 text-base font-semibold text-slate-950 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white/40"
+        >
+          Try again
+        </button>
+      </main>
+    );
   }
 
   return (
