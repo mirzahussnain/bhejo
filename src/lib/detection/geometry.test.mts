@@ -357,3 +357,93 @@ test("accepts small cards and perspective documents when all sides are supported
     true,
   );
 });
+
+// --- Passport single-page detection tests ---
+
+test("accepts a passport page via reconstruction when the fold side is strong and the outer edge has modest support", () => {
+  // Passport page on a moderate-contrast surface: fold side is strong,
+  // top/bottom have decent edges, outer edge (away from fold) has modest support.
+  const corners = orderCorners([
+    { x: 340, y: 100 },
+    { x: 510, y: 105 },
+    { x: 505, y: 380 },
+    { x: 335, y: 375 },
+  ]);
+
+  // Contour area covers most of the passport page rectangle.
+  const passportPageArea = 170 * 275 * 0.7;
+
+  assert.equal(
+    hasSufficientReconstructionEvidence(
+      passportPageArea,
+      corners,
+      createBoundaryEvidence([0.9, 0.48, 0.46, 0.16], 0.45),
+    ),
+    true,
+  );
+});
+
+test("rejects a passport page via reconstruction when the outer edge has negligible support", () => {
+  const corners = orderCorners([
+    { x: 340, y: 100 },
+    { x: 510, y: 105 },
+    { x: 505, y: 380 },
+    { x: 335, y: 375 },
+  ]);
+
+  const passportPageArea = 170 * 275 * 0.7;
+
+  // Outer edge support at 0.05 is below minimumSideSupport (0.14).
+  assert.equal(
+    hasSufficientReconstructionEvidence(
+      passportPageArea,
+      corners,
+      createBoundaryEvidence([0.9, 0.5, 0.5, 0.05], 0.45),
+    ),
+    false,
+  );
+});
+
+test("false-positive patterns remain rejected through the reconstruction evidence path", () => {
+  // Face/glasses: only 2 strong sides at the 0.45 threshold.
+  const faceEvidence = createBoundaryEvidence([0.76, 0.68, 0.05, 0.1], 0.45);
+  assert.equal(
+    hasBalancedBoundaryEvidence(
+      faceEvidence,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG.reconstructionEvidence,
+    ),
+    false,
+  );
+
+  // Partial screen: only 2 strong sides, weak average.
+  const screenEvidence = createBoundaryEvidence([0.9, 0.84, 0.08, 0.14], 0.45);
+  assert.equal(
+    hasBalancedBoundaryEvidence(
+      screenEvidence,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG.reconstructionEvidence,
+    ),
+    false,
+  );
+});
+
+test("accepts a passport-page-sized candidate through geometry validation", () => {
+  // A single passport page in portrait orientation within the 640×480 frame.
+  const passportPage = validateQuadrilateral(
+    [
+      { x: 340, y: 100 },
+      { x: 510, y: 105 },
+      { x: 505, y: 380 },
+      { x: 335, y: 375 },
+    ],
+    frameWidth,
+    frameHeight,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+
+  assert.ok(passportPage);
+  assert.ok(passportPage.metrics.areaRatio > 0.1);
+  assert.ok(passportPage.metrics.areaRatio < 0.25);
+  assert.ok(passportPage.metrics.angleScore > 0.9);
+  assert.ok(passportPage.metrics.edgeConsistency > 0.5);
+});
+

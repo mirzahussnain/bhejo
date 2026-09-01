@@ -75,7 +75,7 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   targetAreaRatio: 0.3,
   maxReconstructedAreaRatio: 0.5,
   minReconstructedContourFill: 0.42,
-  minReconstructedEdgeSupport: 0.5,
+  minReconstructedEdgeSupport: 0.46,
   standardEvidence: {
     samplesPerSide: 18,
     edgeSearchRadiusPx: 2,
@@ -87,8 +87,13 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   reconstructionEvidence: {
     samplesPerSide: 22,
     edgeSearchRadiusPx: 2,
-    minimumSideSupport: 0.2,
-    minimumAverageSupport: 0.54,
+    // Lowered from 0.2/0.54 to allow passport pages where the outer edge
+    // (away from the fold) has modest contrast against the surface.
+    // The other reconstruction guards (maxReconstructedAreaRatio,
+    // minReconstructedContourFill, strongSideSupport, minimumStrongSideCount)
+    // remain strict and continue to reject false positives.
+    minimumSideSupport: 0.14,
+    minimumAverageSupport: 0.46,
     strongSideSupport: 0.45,
     minimumStrongSideCount: 3,
   },
