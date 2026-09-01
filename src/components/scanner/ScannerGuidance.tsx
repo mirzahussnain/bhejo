@@ -1,21 +1,42 @@
+import type { QualityGuidance } from "@/lib/quality/document-quality";
+import type { ScannerState } from "@/lib/scanner/scanner-state";
+
 interface ScannerGuidanceProps {
-  autoScanningAvailable?: boolean;
+  readonly scannerState: ScannerState;
+  readonly qualityGuidance: QualityGuidance | null;
 }
 
+const qualityMessages: Record<QualityGuidance, string> = {
+  "move-closer": "Move closer",
+  "move-away-from-edge": "Move away from the edge",
+  "move-into-better-light": "Move into better light",
+  "hold-still": "Hold still",
+  "move-into-position": "Move your phone into position",
+  ready: "Ready",
+};
+
 export function ScannerGuidance({
-  autoScanningAvailable = false,
+  scannerState,
+  qualityGuidance,
 }: ScannerGuidanceProps) {
+  const message =
+    scannerState === "capturing"
+      ? "Scanning…"
+      : scannerState === "ready"
+        ? "Ready"
+        : scannerState === "hold-still"
+          ? "Hold still"
+          : scannerState === "quality-problem" && qualityGuidance
+            ? qualityMessages[qualityGuidance]
+            : scannerState === "document-detected"
+              ? "Move your phone into position"
+              : "Place your document in view";
+
   return (
-    <div className="text-center text-white">
+    <div className="text-center text-white" aria-live="polite" role="status">
       <h1 className="text-balance text-2xl font-semibold tracking-[-0.02em] sm:text-3xl">
-        Place your document in view
+        {message}
       </h1>
-      {!autoScanningAvailable && (
-        <p className="mt-2 text-sm leading-5 text-slate-200 sm:text-base">
-          Automatic scanning isn&apos;t available yet. Use Capture when ready.
-        </p>
-      )}
     </div>
   );
 }
-

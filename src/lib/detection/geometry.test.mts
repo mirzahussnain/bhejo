@@ -8,6 +8,8 @@ import {
 } from "./geometry.ts";
 import {
   DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  hasSufficientReconstructionEvidence,
+  isReconstructedCandidateEligible,
   scoreDocumentCandidate,
 } from "./document-detection.ts";
 
@@ -182,4 +184,77 @@ test("accepts a small card and a strongly perspective-skewed document", () => {
 
   assert.ok(card);
   assert.ok(perspectiveDocument);
+});
+
+test("accepts rounded-corner-like card geometry", () => {
+  const card = validateQuadrilateral(
+    [
+      { x: 236, y: 184 },
+      { x: 408, y: 180 },
+      { x: 414, y: 296 },
+      { x: 232, y: 302 },
+    ],
+    frameWidth,
+    frameHeight,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+
+  assert.ok(card);
+});
+
+test("accepts a partially fragmented card boundary with enough evidence", () => {
+  const corners = orderCorners([
+    { x: 180, y: 140 },
+    { x: 450, y: 150 },
+    { x: 440, y: 320 },
+    { x: 170, y: 310 },
+  ]);
+
+  assert.equal(
+    hasSufficientReconstructionEvidence(35_000, 700, corners),
+    true,
+  );
+  assert.equal(
+    hasSufficientReconstructionEvidence(4_000, 150, corners),
+    false,
+  );
+});
+
+test("rejects a reconstructed candidate that is too small to be a document", () => {
+  const smallCorners = orderCorners([
+    { x: 300, y: 220 },
+    { x: 340, y: 220 },
+    { x: 340, y: 250 },
+    { x: 300, y: 250 },
+  ]);
+
+  assert.equal(
+    validateQuadrilateral(
+      smallCorners,
+      frameWidth,
+      frameHeight,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+    ),
+    null,
+  );
+});
+
+test("does not promote a large rectangular false positive through reconstruction", () => {
+  const screenLikeCandidate = validateQuadrilateral(
+    [
+      { x: 30, y: 40 },
+      { x: 610, y: 40 },
+      { x: 610, y: 440 },
+      { x: 30, y: 440 },
+    ],
+    frameWidth,
+    frameHeight,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+
+  assert.ok(screenLikeCandidate);
+  assert.equal(
+    isReconstructedCandidateEligible(screenLikeCandidate, 230_000, 1_960),
+    false,
+  );
 });

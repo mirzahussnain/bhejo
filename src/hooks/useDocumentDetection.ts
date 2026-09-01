@@ -6,6 +6,7 @@ import type { AnalysisFrame } from "@/lib/camera/frame-sampler";
 import {
   runDocumentDetection,
   type DocumentDetection,
+  type DocumentCandidateStrategy,
 } from "@/lib/detection/document-detection";
 import { loadOpenCv } from "@/lib/detection/opencv-loader";
 
@@ -20,9 +21,15 @@ export interface DocumentDetectionDiagnostics {
   readonly corners: DocumentDetection["corners"] | null;
   readonly contourCount: number | null;
   readonly quadrilateralCount: number | null;
+  readonly candidateStrategy: DocumentCandidateStrategy | null;
   readonly lastError: "initialization-failed" | "processing-failed" | null;
   readonly processedFrameCount: number;
   readonly skippedFrameCount: number;
+}
+
+export interface ProcessedDocumentFrame {
+  readonly frame: AnalysisFrame;
+  readonly detection: DocumentDetection | null;
 }
 
 declare global {
@@ -40,15 +47,20 @@ const INITIAL_DIAGNOSTICS: DocumentDetectionDiagnostics = {
   corners: null,
   contourCount: null,
   quadrilateralCount: null,
+  candidateStrategy: null,
   lastError: null,
   processedFrameCount: 0,
   skippedFrameCount: 0,
 };
 
-export function useDocumentDetection(active: boolean) {
+export function useDocumentDetection(
+  active: boolean,
+  onProcessedFrame?: (result: ProcessedDocumentFrame) => void,
+) {
   const activeRef = useRef(active);
   const cvRef = useRef<typeof OpenCV | null>(null);
   const processingRef = useRef(false);
+  const onProcessedFrameRef = useRef(onProcessedFrame);
   const diagnosticsRef = useRef<DocumentDetectionDiagnostics>({
     ...INITIAL_DIAGNOSTICS,
   });
@@ -94,6 +106,7 @@ export function useDocumentDetection(active: boolean) {
               confidence: null,
               areaRatio: null,
               corners: null,
+              candidateStrategy: null,
               lastError: "initialization-failed",
             };
           }
@@ -104,6 +117,10 @@ export function useDocumentDetection(active: boolean) {
       cancelled = true;
     };
   }, [active]);
+
+  useEffect(() => {
+    onProcessedFrameRef.current = onProcessedFrame;
+  }, [onProcessedFrame]);
 
   const processFrame = useCallback((frame: AnalysisFrame) => {
     const cv = cvRef.current;
@@ -134,11 +151,13 @@ export function useDocumentDetection(active: boolean) {
         corners: detection?.corners ?? null,
         contourCount: result.contourCount,
         quadrilateralCount: result.quadrilateralCount,
+        candidateStrategy: result.strategy,
         lastError: null,
         processedFrameCount:
           diagnosticsRef.current.processedFrameCount + 1,
         skippedFrameCount: diagnosticsRef.current.skippedFrameCount,
       };
+      onProcessedFrameRef.current?.({ frame, detection });
     } catch {
       diagnosticsRef.current = {
         ...diagnosticsRef.current,
@@ -150,6 +169,7 @@ export function useDocumentDetection(active: boolean) {
         corners: null,
         contourCount: null,
         quadrilateralCount: null,
+        candidateStrategy: null,
         lastError: "processing-failed",
       };
     } finally {

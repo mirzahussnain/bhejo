@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import type { CameraStatus } from "@/types/camera";
 
 const cameraMessages: Record<
@@ -41,12 +41,14 @@ interface CameraPreviewProps {
   status: CameraStatus;
   videoRef: RefObject<HTMLVideoElement | null>;
   onStart: () => void;
+  overlay?: ReactNode;
 }
 
 export function CameraPreview({
   status,
   videoRef,
   onStart,
+  overlay,
 }: CameraPreviewProps) {
   const cameraReady = status === "ready";
   const message = cameraReady ? null : cameraMessages[status];
@@ -63,7 +65,7 @@ export function CameraPreview({
       />
 
       {cameraReady ? (
-        <div className="pointer-events-none absolute inset-[8%] rounded-2xl border-2 border-white/80 shadow-[0_2px_18px_rgba(0,0,0,0.28)]" />
+        overlay
       ) : (
         <div className="absolute inset-0 flex items-center justify-center px-6">
           <div
@@ -95,4 +97,3 @@ export function CameraPreview({
     </div>
   );
 }
-
