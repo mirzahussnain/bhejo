@@ -5,6 +5,7 @@ import { CameraPreview } from "@/components/scanner/CameraPreview";
 import { ScannerGuidance } from "@/components/scanner/ScannerGuidance";
 import { ScanPreview } from "@/components/scanner/ScanPreview";
 import { useCamera } from "@/hooks/useCamera";
+import { useDocumentDetection } from "@/hooks/useDocumentDetection";
 import { useFrameSampler } from "@/hooks/useFrameSampler";
 import { captureVideoFrame } from "@/lib/camera/camera";
 
@@ -16,10 +17,13 @@ export function CameraScanner() {
   const previewUrlRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const restartOnLiveViewRef = useRef(false);
+  const analysisActive = status === "ready" && !previewUrl && !capturePending;
+  const processDocumentFrame = useDocumentDetection(analysisActive);
 
   useFrameSampler({
-    active: status === "ready" && !previewUrl && !capturePending,
+    active: analysisActive,
     videoRef,
+    onFrame: processDocumentFrame,
   });
 
   const replacePreviewUrl = useCallback((nextUrl: string | null) => {
