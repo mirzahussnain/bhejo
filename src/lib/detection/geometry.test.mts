@@ -12,6 +12,11 @@ import {
   isReconstructedCandidateEligible,
   scoreDocumentCandidate,
 } from "./document-detection.ts";
+import {
+  calculateCandidateBoundaryEvidence,
+  createBoundaryEvidence,
+  hasBalancedBoundaryEvidence,
+} from "./candidate-evidence.ts";
 
 const frameWidth = 640;
 const frameHeight = 480;
@@ -129,7 +134,7 @@ test("area ratio uses the analysis frame dimensions", () => {
   assert.equal(candidate.metrics.areaRatio, 0.25);
 });
 
-test("candidate scoring favors a larger, well-framed rectangle", () => {
+test("candidate scoring favors strong four-sided evidence over inferred geometry", () => {
   const smaller = validateQuadrilateral(
     [
       { x: 220, y: 160 },
@@ -155,7 +160,18 @@ test("candidate scoring favors a larger, well-framed rectangle", () => {
 
   assert.ok(smaller);
   assert.ok(larger);
-  assert.ok(scoreDocumentCandidate(larger) > scoreDocumentCandidate(smaller));
+  assert.ok(
+    scoreDocumentCandidate(
+      smaller,
+      undefined,
+      createBoundaryEvidence([0.94, 0.9, 0.88, 0.91]),
+    ) >
+      scoreDocumentCandidate(
+        larger,
+        undefined,
+        createBoundaryEvidence([0.65, 0.58, 0.1, 0.12]),
+      ),
+  );
 });
 
 test("accepts a small card and a strongly perspective-skewed document", () => {
@@ -202,7 +218,7 @@ test("accepts rounded-corner-like card geometry", () => {
   assert.ok(card);
 });
 
-test("accepts a partially fragmented card boundary with enough evidence", () => {
+test("accepts glossy and fragmented card boundaries when evidence is balanced", () => {
   const corners = orderCorners([
     { x: 180, y: 140 },
     { x: 450, y: 150 },
@@ -211,11 +227,19 @@ test("accepts a partially fragmented card boundary with enough evidence", () => 
   ]);
 
   assert.equal(
-    hasSufficientReconstructionEvidence(35_000, 700, corners),
+    hasSufficientReconstructionEvidence(
+      35_000,
+      corners,
+      createBoundaryEvidence([0.72, 0.58, 0.46, 0.52], 0.45),
+    ),
     true,
   );
   assert.equal(
-    hasSufficientReconstructionEvidence(4_000, 150, corners),
+    hasSufficientReconstructionEvidence(
+      4_000,
+      corners,
+      createBoundaryEvidence([0.72, 0.58, 0.46, 0.52], 0.45),
+    ),
     false,
   );
 });
@@ -254,7 +278,82 @@ test("does not promote a large rectangular false positive through reconstruction
 
   assert.ok(screenLikeCandidate);
   assert.equal(
-    isReconstructedCandidateEligible(screenLikeCandidate, 230_000, 1_960),
+    isReconstructedCandidateEligible(
+      screenLikeCandidate,
+      230_000,
+      createBoundaryEvidence([0.96, 0.96, 0.96, 0.96], 0.45),
+    ),
     false,
+  );
+});
+
+test("measures edge support independently for all four document sides", () => {
+  const width = 20;
+  const height = 20;
+  const edges = new Uint8Array(width * height);
+  for (let index = 3; index <= 16; index += 1) {
+    edges[3 * width + index] = 255;
+    edges[16 * width + index] = 255;
+    edges[index * width + 3] = 255;
+    edges[index * width + 16] = 255;
+  }
+
+  const evidence = calculateCandidateBoundaryEvidence(
+    { data: edges, width, height },
+    [
+      { x: 3, y: 3 },
+      { x: 16, y: 3 },
+      { x: 16, y: 16 },
+      { x: 3, y: 16 },
+    ],
+    {
+      ...DEFAULT_DOCUMENT_DETECTOR_CONFIG.standardEvidence,
+      samplesPerSide: 8,
+      edgeSearchRadiusPx: 0,
+    },
+  );
+
+  assert.deepEqual(evidence.sideSupport, [1, 1, 1, 1]);
+});
+
+test("rejects face, glasses, and partial screen-like geometry with unbalanced sides", () => {
+  const faceOrGlassesEvidence = createBoundaryEvidence([0.76, 0.68, 0.05, 0.1]);
+  const partialScreenEvidence = createBoundaryEvidence([0.9, 0.84, 0.08, 0.14]);
+
+  assert.equal(
+    hasBalancedBoundaryEvidence(
+      faceOrGlassesEvidence,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG.standardEvidence,
+    ),
+    false,
+  );
+  assert.equal(
+    hasBalancedBoundaryEvidence(
+      partialScreenEvidence,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG.reconstructionEvidence,
+    ),
+    false,
+  );
+});
+
+test("accepts small cards and perspective documents when all sides are supported", () => {
+  const smallCardEvidence = createBoundaryEvidence([0.48, 0.44, 0.39, 0.42]);
+  const perspectiveDocumentEvidence = createBoundaryEvidence([
+    0.85, 0.64, 0.58, 0.77,
+  ]);
+
+  assert.equal(
+    hasBalancedBoundaryEvidence(
+      smallCardEvidence,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG.standardEvidence,
+    ),
+    true,
+  );
+  assert.equal(
+    hasBalancedBoundaryEvidence(
+      perspectiveDocumentEvidence,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG.standardEvidence,
+    ),
+    true,
   );
 });

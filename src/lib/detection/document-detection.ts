@@ -1,7 +1,6 @@
 import type { OpenCV } from "@opencvjs/web";
 import type { AnalysisFrame } from "@/lib/camera/frame-sampler";
 import {
-  distance,
   polygonArea,
   validateQuadrilateral,
   type DocumentCorners,
@@ -9,11 +8,21 @@ import {
   type QuadrilateralValidationConfig,
   type ValidQuadrilateral,
 } from "./geometry.ts";
+import {
+  calculateCandidateBoundaryEvidence,
+  createBoundaryEvidence,
+  hasBalancedBoundaryEvidence,
+  type CandidateBoundaryEvidence,
+  type CandidateEvidenceConfig,
+  type EdgeMap,
+} from "./candidate-evidence.ts";
 
 export interface DocumentDetection {
   readonly corners: DocumentCorners;
   readonly confidence: number;
   readonly areaRatio: number;
+  readonly edgeSupport: number;
+  readonly geometryScore: number;
 }
 
 export interface DocumentDetectorConfig
@@ -30,6 +39,8 @@ export interface DocumentDetectorConfig
   readonly maxReconstructedAreaRatio: number;
   readonly minReconstructedContourFill: number;
   readonly minReconstructedEdgeSupport: number;
+  readonly standardEvidence: CandidateEvidenceConfig;
+  readonly reconstructionEvidence: CandidateEvidenceConfig;
 }
 
 export type DocumentCandidateStrategy =
@@ -65,6 +76,22 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   maxReconstructedAreaRatio: 0.5,
   minReconstructedContourFill: 0.42,
   minReconstructedEdgeSupport: 0.5,
+  standardEvidence: {
+    samplesPerSide: 18,
+    edgeSearchRadiusPx: 2,
+    minimumSideSupport: 0.12,
+    minimumAverageSupport: 0.38,
+    strongSideSupport: 0.32,
+    minimumStrongSideCount: 3,
+  },
+  reconstructionEvidence: {
+    samplesPerSide: 22,
+    edgeSearchRadiusPx: 2,
+    minimumSideSupport: 0.2,
+    minimumAverageSupport: 0.54,
+    strongSideSupport: 0.45,
+    minimumStrongSideCount: 3,
+  },
 };
 
 function clampScore(value: number): number {
@@ -74,18 +101,21 @@ function clampScore(value: number): number {
 export function scoreDocumentCandidate(
   candidate: ValidQuadrilateral,
   targetAreaRatio = DEFAULT_DOCUMENT_DETECTOR_CONFIG.targetAreaRatio,
-  edgeSupport = 1,
+  boundaryEvidence: CandidateBoundaryEvidence = createBoundaryEvidence([
+    1, 1, 1, 1,
+  ]),
 ): number {
   const areaScore = clampScore(
     Math.sqrt(candidate.metrics.areaRatio / targetAreaRatio),
   );
 
   return clampScore(
-    areaScore * 0.25 +
-      candidate.metrics.angleScore * 0.28 +
-      candidate.metrics.edgeConsistency * 0.15 +
-      candidate.metrics.boundaryScore * 0.12 +
-      clampScore(edgeSupport) * 0.2,
+    areaScore * 0.14 +
+      candidate.metrics.angleScore * 0.17 +
+      candidate.metrics.edgeConsistency * 0.1 +
+      candidate.metrics.boundaryScore * 0.07 +
+      boundaryEvidence.averageSupport * 0.38 +
+      boundaryEvidence.weakestSideSupport * 0.14,
   );
 }
 
@@ -110,56 +140,48 @@ interface ContourSearchResult {
   readonly quadrilateralCount: number;
 }
 
-function rectanglePerimeter(corners: DocumentCorners): number {
-  return corners.reduce(
-    (total, point, index) =>
-      total + distance(point, corners[(index + 1) % corners.length]),
-    0,
-  );
-}
-
 export function hasSufficientReconstructionEvidence(
   contourArea: number,
-  contourPerimeter: number,
   corners: DocumentCorners,
+  boundaryEvidence: CandidateBoundaryEvidence,
   config: Pick<
     DocumentDetectorConfig,
-    "minReconstructedContourFill" | "minReconstructedEdgeSupport"
+    | "minReconstructedContourFill"
+    | "minReconstructedEdgeSupport"
+    | "reconstructionEvidence"
   > = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
 ): boolean {
   const rectangleArea = polygonArea(corners);
-  const perimeter = rectanglePerimeter(corners);
-
-  if (rectangleArea <= 0 || perimeter <= 0) {
+  if (rectangleArea <= 0) {
     return false;
   }
 
   const contourFill = Math.abs(contourArea) / rectangleArea;
-  const edgeSupport = Math.min(1, contourPerimeter / perimeter);
-
   return (
     contourFill >= config.minReconstructedContourFill &&
-    edgeSupport >= config.minReconstructedEdgeSupport
+    boundaryEvidence.averageSupport >= config.minReconstructedEdgeSupport &&
+    hasBalancedBoundaryEvidence(boundaryEvidence, config.reconstructionEvidence)
   );
 }
 
 export function isReconstructedCandidateEligible(
   candidate: ValidQuadrilateral,
   contourArea: number,
-  contourPerimeter: number,
+  boundaryEvidence: CandidateBoundaryEvidence,
   config: Pick<
     DocumentDetectorConfig,
     | "maxReconstructedAreaRatio"
     | "minReconstructedContourFill"
     | "minReconstructedEdgeSupport"
+    | "reconstructionEvidence"
   > = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
 ): boolean {
   return (
     candidate.metrics.areaRatio <= config.maxReconstructedAreaRatio &&
     hasSufficientReconstructionEvidence(
       contourArea,
-      contourPerimeter,
       candidate.corners,
+      boundaryEvidence,
       config,
     )
   );
@@ -167,7 +189,7 @@ export function isReconstructedCandidateEligible(
 
 function createScoredCandidate(
   candidate: ValidQuadrilateral,
-  edgeSupport: number,
+  boundaryEvidence: CandidateBoundaryEvidence,
   strategy: DocumentCandidateStrategy,
   config: DocumentDetectorConfig,
 ): ScoredDocumentCandidate {
@@ -178,9 +200,14 @@ function createScoredCandidate(
       confidence: scoreDocumentCandidate(
         candidate,
         config.targetAreaRatio,
-        edgeSupport,
+        boundaryEvidence,
       ),
       areaRatio: candidate.metrics.areaRatio,
+      edgeSupport: boundaryEvidence.averageSupport,
+      geometryScore:
+        candidate.metrics.angleScore * 0.5 +
+        candidate.metrics.edgeConsistency * 0.3 +
+        candidate.metrics.boundaryScore * 0.2,
     },
   };
 }
@@ -255,9 +282,22 @@ function findContourCandidates(
             continue;
           }
 
+          const boundaryEvidence = calculateCandidateBoundaryEvidence(
+            {
+              data: edges.data,
+              width: frame.width,
+              height: frame.height,
+            } satisfies EdgeMap,
+            quadrilateral.corners,
+            config.standardEvidence,
+          );
+          if (!hasBalancedBoundaryEvidence(boundaryEvidence, config.standardEvidence)) {
+            continue;
+          }
+
           candidate = chooseCandidate(
             candidate,
-            createScoredCandidate(quadrilateral, 1, strategy, config),
+            createScoredCandidate(quadrilateral, boundaryEvidence, strategy, config),
           );
         }
 
@@ -275,12 +315,24 @@ function findContourCandidates(
           config,
         );
 
+        const boundaryEvidence = reconstructed
+          ? calculateCandidateBoundaryEvidence(
+              {
+                data: edges.data,
+                width: frame.width,
+                height: frame.height,
+              } satisfies EdgeMap,
+              reconstructed.corners,
+              config.reconstructionEvidence,
+            )
+          : null;
         if (
           !reconstructed ||
+          !boundaryEvidence ||
           !isReconstructedCandidateEligible(
             reconstructed,
             contourArea,
-            contourPerimeter,
+            boundaryEvidence,
             config,
           )
         ) {
@@ -288,15 +340,11 @@ function findContourCandidates(
         }
 
         quadrilateralCount += 1;
-        const edgeSupport = Math.min(
-          1,
-          contourPerimeter / rectanglePerimeter(reconstructed.corners),
-        );
         candidate = chooseCandidate(
           candidate,
           createScoredCandidate(
             reconstructed,
-            edgeSupport,
+            boundaryEvidence,
             "weak-edge-reconstruction",
             config,
           ),

@@ -17,6 +17,8 @@ export interface DocumentDetectionDiagnostics {
   readonly documentDetected: boolean;
   readonly confidence: number | null;
   readonly areaRatio: number | null;
+  readonly edgeSupport: number | null;
+  readonly geometryScore: number | null;
   readonly processingDurationMs: number | null;
   readonly corners: DocumentDetection["corners"] | null;
   readonly contourCount: number | null;
@@ -43,6 +45,8 @@ const INITIAL_DIAGNOSTICS: DocumentDetectionDiagnostics = {
   documentDetected: false,
   confidence: null,
   areaRatio: null,
+  edgeSupport: null,
+  geometryScore: null,
   processingDurationMs: null,
   corners: null,
   contourCount: null,
@@ -75,6 +79,8 @@ export function useDocumentDetection(
         documentDetected: false,
         confidence: null,
         areaRatio: null,
+        edgeSupport: null,
+        geometryScore: null,
         corners: null,
       };
       return;
@@ -105,6 +111,8 @@ export function useDocumentDetection(
               documentDetected: false,
               confidence: null,
               areaRatio: null,
+              edgeSupport: null,
+              geometryScore: null,
               corners: null,
               candidateStrategy: null,
               lastError: "initialization-failed",
@@ -147,6 +155,8 @@ export function useDocumentDetection(
         documentDetected: detection !== null,
         confidence: detection?.confidence ?? null,
         areaRatio: detection?.areaRatio ?? null,
+        edgeSupport: detection?.edgeSupport ?? null,
+        geometryScore: detection?.geometryScore ?? null,
         processingDurationMs: performance.now() - startedAt,
         corners: detection?.corners ?? null,
         contourCount: result.contourCount,
@@ -165,6 +175,8 @@ export function useDocumentDetection(
         documentDetected: false,
         confidence: null,
         areaRatio: null,
+        edgeSupport: null,
+        geometryScore: null,
         processingDurationMs: performance.now() - startedAt,
         corners: null,
         contourCount: null,
