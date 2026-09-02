@@ -250,3 +250,51 @@ export function validateQuadrilateral(
     },
   };
 }
+
+/**
+ * Tests whether a point lies inside or on the boundary of a convex
+ * quadrilateral. Uses cross-product sign consistency with a small
+ * epsilon for floating-point tolerance near edges.
+ *
+ * Works correctly regardless of clockwise/counter-clockwise corner ordering.
+ */
+export function isPointInsideConvexQuad(
+  point: Point,
+  quad: DocumentCorners,
+  epsilon = 1e-6,
+): boolean {
+  let positiveCount = 0;
+  let negativeCount = 0;
+
+  for (let i = 0; i < 4; i += 1) {
+    const a = quad[i];
+    const b = quad[(i + 1) % 4];
+
+    // Cross product of edge vector (a→b) and point vector (a→point).
+    const cross =
+      (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
+
+    if (cross > epsilon) {
+      positiveCount += 1;
+    } else if (cross < -epsilon) {
+      negativeCount += 1;
+    }
+    // Points within epsilon of an edge are treated as on the boundary.
+  }
+
+  // All cross products must have the same sign (or be near-zero).
+  // Mixed positive and negative means the point is outside.
+  return positiveCount === 0 || negativeCount === 0;
+}
+
+/**
+ * Tests whether all four corners of the inner quadrilateral lie
+ * inside (or on the boundary of) the outer convex quadrilateral.
+ */
+export function isContainedWithin(
+  inner: DocumentCorners,
+  outer: DocumentCorners,
+  epsilon = 1e-6,
+): boolean {
+  return inner.every((corner) => isPointInsideConvexQuad(corner, outer, epsilon));
+}

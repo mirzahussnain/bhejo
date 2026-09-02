@@ -33,6 +33,7 @@ interface LiveAnalysis {
   readonly quality: DocumentQuality | null;
   readonly stability: DocumentStability | null;
   readonly analysisDimensions: { readonly width: number; readonly height: number } | null;
+  readonly displayCorners: DocumentDetection["corners"] | null;
 }
 
 interface ProcessedScan {
@@ -47,6 +48,7 @@ const INITIAL_LIVE_ANALYSIS: LiveAnalysis = {
   quality: null,
   stability: null,
   analysisDimensions: null,
+  displayCorners: null,
 };
 
 const AUTO_CAPTURE_DELAY_MS = 180;
@@ -108,14 +110,14 @@ export function CameraScanner() {
 
       try {
         const capturedFrame = captureVideoFrame(videoRef.current);
-        const { detection, analysisDimensions } = liveAnalysisRef.current;
+        const { detection, analysisDimensions, displayCorners } = liveAnalysisRef.current;
         setProcessingState("processing");
         stopCamera();
 
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         const result = await processCapturedFrame({
           capturedFrame,
-          analysisCorners: detection?.corners ?? null,
+          analysisCorners: displayCorners ?? detection?.corners ?? null,
           analysisDimensions,
         });
         if (!mountedRef.current || operationId !== operationIdRef.current) {
@@ -161,11 +163,13 @@ export function CameraScanner() {
         qualityAcceptable: quality?.isAcceptable ?? false,
         timestamp: frame.timestamp,
       });
+      const displayCorners = stability.smoothedCorners ?? detection?.corners ?? null;
       const nextAnalysis = {
         detection,
         quality,
         stability,
         analysisDimensions: { width: frame.width, height: frame.height },
+        displayCorners,
       };
       liveAnalysisRef.current = nextAnalysis;
       setLiveAnalysis(nextAnalysis);
@@ -340,7 +344,7 @@ export function CameraScanner() {
         overlay={
           <DocumentOverlay
             videoRef={videoRef}
-            corners={displayedAnalysis.detection?.corners ?? null}
+            corners={displayedAnalysis.displayCorners ?? null}
             analysisDimensions={displayedAnalysis.analysisDimensions}
             scannerState={scannerState}
           />

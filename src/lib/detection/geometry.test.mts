@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isContainedWithin,
+  isPointInsideConvexQuad,
   orderCorners,
   polygonArea,
   validateQuadrilateral,
+  type DocumentCorners,
   type Point,
 } from "./geometry.ts";
 import {
@@ -11,6 +14,7 @@ import {
   hasSufficientReconstructionEvidence,
   isReconstructedCandidateEligible,
   scoreDocumentCandidate,
+  selectBestCandidate,
 } from "./document-detection.ts";
 import {
   calculateCandidateBoundaryEvidence,
@@ -445,5 +449,572 @@ test("accepts a passport-page-sized candidate through geometry validation", () =
   assert.ok(passportPage.metrics.areaRatio < 0.25);
   assert.ok(passportPage.metrics.angleScore > 0.9);
   assert.ok(passportPage.metrics.edgeConsistency > 0.5);
+});
+
+// --- isPointInsideConvexQuad ---
+
+test("detects point inside a clockwise quad", () => {
+  const quad: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 400 },
+    { x: 100, y: 400 },
+  ];
+  assert.equal(isPointInsideConvexQuad({ x: 300, y: 250 }, quad), true);
+});
+
+test("detects point inside a counter-clockwise quad", () => {
+  const quad: DocumentCorners = [
+    { x: 100, y: 400 },
+    { x: 500, y: 400 },
+    { x: 500, y: 100 },
+    { x: 100, y: 100 },
+  ];
+  assert.equal(isPointInsideConvexQuad({ x: 300, y: 250 }, quad), true);
+});
+
+test("detects point outside a quad", () => {
+  const quad: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 400 },
+    { x: 100, y: 400 },
+  ];
+  assert.equal(isPointInsideConvexQuad({ x: 50, y: 250 }, quad), false);
+  assert.equal(isPointInsideConvexQuad({ x: 600, y: 250 }, quad), false);
+  assert.equal(isPointInsideConvexQuad({ x: 300, y: 50 }, quad), false);
+  assert.equal(isPointInsideConvexQuad({ x: 300, y: 450 }, quad), false);
+});
+
+test("treats points on the edge as inside (within epsilon)", () => {
+  const quad: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 400 },
+    { x: 100, y: 400 },
+  ];
+  // Point exactly on the top edge.
+  assert.equal(isPointInsideConvexQuad({ x: 300, y: 100 }, quad), true);
+  // Point exactly on a corner.
+  assert.equal(isPointInsideConvexQuad({ x: 100, y: 100 }, quad), true);
+});
+
+test("handles near-edge floating-point cases", () => {
+  const quad: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 400 },
+    { x: 100, y: 400 },
+  ];
+  // A point that is numerically barely inside (floating-point imprecision).
+  assert.equal(
+    isPointInsideConvexQuad({ x: 100.0000001, y: 100.0000001 }, quad),
+    true,
+  );
+  // A point that is barely outside.
+  assert.equal(
+    isPointInsideConvexQuad({ x: 99.9999, y: 99.9999 }, quad),
+    false,
+  );
+});
+
+test("works with perspective-skewed quad", () => {
+  const quad: DocumentCorners = [
+    { x: 150, y: 80 },
+    { x: 490, y: 120 },
+    { x: 520, y: 400 },
+    { x: 100, y: 380 },
+  ];
+  // Center should be inside.
+  assert.equal(isPointInsideConvexQuad({ x: 300, y: 250 }, quad), true);
+  // Far corner should be outside.
+  assert.equal(isPointInsideConvexQuad({ x: 50, y: 50 }, quad), false);
+});
+
+// --- isContainedWithin ---
+
+test("detects a small quad contained within a larger quad", () => {
+  const outer: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 400 },
+    { x: 100, y: 400 },
+  ];
+  const inner: DocumentCorners = [
+    { x: 200, y: 200 },
+    { x: 400, y: 200 },
+    { x: 400, y: 300 },
+    { x: 200, y: 300 },
+  ];
+  assert.equal(isContainedWithin(inner, outer), true);
+});
+
+test("rejects partially overlapping quads as not contained", () => {
+  const outer: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 400 },
+    { x: 100, y: 400 },
+  ];
+  const overlapping: DocumentCorners = [
+    { x: 50, y: 200 },
+    { x: 300, y: 200 },
+    { x: 300, y: 350 },
+    { x: 50, y: 350 },
+  ];
+  assert.equal(isContainedWithin(overlapping, outer), false);
+});
+
+test("rejects completely separate quads as not contained", () => {
+  const a: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 200, y: 100 },
+    { x: 200, y: 200 },
+    { x: 100, y: 200 },
+  ];
+  const b: DocumentCorners = [
+    { x: 300, y: 300 },
+    { x: 400, y: 300 },
+    { x: 400, y: 400 },
+    { x: 300, y: 400 },
+  ];
+  assert.equal(isContainedWithin(a, b), false);
+  assert.equal(isContainedWithin(b, a), false);
+});
+
+test("containment works with counter-clockwise outer quad", () => {
+  const outer: DocumentCorners = [
+    { x: 100, y: 400 },
+    { x: 500, y: 400 },
+    { x: 500, y: 100 },
+    { x: 100, y: 100 },
+  ];
+  const inner: DocumentCorners = [
+    { x: 200, y: 200 },
+    { x: 400, y: 200 },
+    { x: 400, y: 300 },
+    { x: 200, y: 300 },
+  ];
+  assert.equal(isContainedWithin(inner, outer), true);
+});
+
+// --- selectBestCandidate: containment-aware selection ---
+
+// Helper to create a mock scored candidate for selection tests.
+function makeScoredCandidate(
+  corners: DocumentCorners,
+  areaRatio: number,
+  confidence: number,
+  sideSupport: readonly [number, number, number, number],
+) {
+  return {
+    detection: {
+      corners,
+      confidence,
+      areaRatio,
+      edgeSupport: sideSupport.reduce((a, b) => a + b, 0) / 4,
+      geometryScore: 0.8,
+    },
+    strategy: "standard-edge-contour" as const,
+    boundaryEvidence: createBoundaryEvidence(sideSupport),
+  };
+}
+
+// Card outer boundary.
+const cardOuter: DocumentCorners = orderCorners([
+  { x: 150, y: 120 },
+  { x: 490, y: 125 },
+  { x: 485, y: 360 },
+  { x: 145, y: 355 },
+]);
+
+// Photo rectangle inside the card.
+const photoInner: DocumentCorners = orderCorners([
+  { x: 170, y: 160 },
+  { x: 280, y: 162 },
+  { x: 278, y: 300 },
+  { x: 168, y: 298 },
+]);
+
+// Chip rectangle inside the card.
+const chipInner: DocumentCorners = orderCorners([
+  { x: 180, y: 250 },
+  { x: 240, y: 250 },
+  { x: 240, y: 300 },
+  { x: 180, y: 300 },
+]);
+
+// Barcode rectangle inside the card.
+const barcodeInner: DocumentCorners = orderCorners([
+  { x: 300, y: 280 },
+  { x: 470, y: 282 },
+  { x: 468, y: 340 },
+  { x: 298, y: 338 },
+]);
+
+test("card + photo: prefers outer card boundary over inner photo", () => {
+  const outer = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.55,
+    [0.52, 0.45, 0.48, 0.42],
+  );
+  const inner = makeScoredCandidate(
+    photoInner,
+    0.06,
+    0.72,
+    [0.92, 0.88, 0.90, 0.86],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardOuter);
+});
+
+test("card + chip: prefers outer card boundary over inner chip", () => {
+  const outer = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.52,
+    [0.50, 0.42, 0.46, 0.40],
+  );
+  const inner = makeScoredCandidate(
+    chipInner,
+    0.02,
+    0.68,
+    [0.95, 0.92, 0.94, 0.90],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardOuter);
+});
+
+test("card + barcode: prefers outer card boundary over inner barcode", () => {
+  const outer = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.54,
+    [0.50, 0.44, 0.46, 0.42],
+  );
+  const inner = makeScoredCandidate(
+    barcodeInner,
+    0.05,
+    0.70,
+    [0.90, 0.85, 0.88, 0.84],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardOuter);
+});
+
+test("document + QR code: prefers outer boundary over internal QR rectangle", () => {
+  const docOuter: DocumentCorners = orderCorners([
+    { x: 80, y: 60 },
+    { x: 560, y: 65 },
+    { x: 555, y: 420 },
+    { x: 75, y: 415 },
+  ]);
+  const qrInner: DocumentCorners = orderCorners([
+    { x: 420, y: 320 },
+    { x: 520, y: 322 },
+    { x: 518, y: 400 },
+    { x: 418, y: 398 },
+  ]);
+
+  const outer = makeScoredCandidate(
+    docOuter,
+    0.51,
+    0.58,
+    [0.60, 0.52, 0.55, 0.48],
+  );
+  const inner = makeScoredCandidate(
+    qrInner,
+    0.04,
+    0.75,
+    [0.96, 0.94, 0.95, 0.93],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, docOuter);
+});
+
+test("passport page + MRZ: prefers outer page boundary when evidence is sufficient", () => {
+  const pageOuter: DocumentCorners = orderCorners([
+    { x: 340, y: 100 },
+    { x: 510, y: 105 },
+    { x: 505, y: 380 },
+    { x: 335, y: 375 },
+  ]);
+  const mrzInner: DocumentCorners = orderCorners([
+    { x: 345, y: 310 },
+    { x: 500, y: 312 },
+    { x: 498, y: 370 },
+    { x: 343, y: 368 },
+  ]);
+
+  const outer = makeScoredCandidate(
+    pageOuter,
+    0.15,
+    0.50,
+    [0.55, 0.42, 0.48, 0.38],
+  );
+  const inner = makeScoredCandidate(
+    mrzInner,
+    0.05,
+    0.78,
+    [0.97, 0.95, 0.96, 0.94],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, pageOuter);
+});
+
+test("multiple nested: prefers outer boundary over multiple internal rectangles", () => {
+  const outer = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.53,
+    [0.50, 0.43, 0.47, 0.41],
+  );
+  const photo = makeScoredCandidate(
+    photoInner,
+    0.06,
+    0.73,
+    [0.92, 0.88, 0.90, 0.86],
+  );
+  const chip = makeScoredCandidate(
+    chipInner,
+    0.02,
+    0.69,
+    [0.95, 0.92, 0.94, 0.90],
+  );
+  const barcode = makeScoredCandidate(
+    barcodeInner,
+    0.05,
+    0.71,
+    [0.90, 0.85, 0.88, 0.84],
+  );
+
+  // The highest confidence inner candidate (photo at 0.73) should still
+  // lose to the outer because outer contains it and has evidence.
+  const winner = selectBestCandidate([photo, chip, barcode, outer]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardOuter);
+});
+
+test("outer boundary lower confidence but supported → outer wins via containment", () => {
+  const outer = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.45,  // Lower confidence than inner.
+    [0.44, 0.40, 0.42, 0.38],
+  );
+  const inner = makeScoredCandidate(
+    photoInner,
+    0.06,
+    0.80,  // Much higher confidence.
+    [0.97, 0.95, 0.96, 0.94],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(
+    winner.detection.corners,
+    cardOuter,
+    "Outer boundary should win even with lower confidence when it has sufficient evidence",
+  );
+});
+
+test("outer boundary insufficiently supported → inner candidate wins", () => {
+  const weakOuter = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.30,
+    [0.20, 0.05, 0.10, 0.08],  // Fails hasBalancedBoundaryEvidence.
+  );
+  const inner = makeScoredCandidate(
+    photoInner,
+    0.06,
+    0.75,
+    [0.92, 0.88, 0.90, 0.86],
+  );
+
+  const winner = selectBestCandidate([inner, weakOuter]);
+  assert.ok(winner);
+  assert.deepEqual(
+    winner.detection.corners,
+    photoInner,
+    "Inner candidate should win when outer has insufficient boundary evidence",
+  );
+});
+
+test("overlapping non-contained candidates → containment preference does not activate", () => {
+  const a: DocumentCorners = orderCorners([
+    { x: 100, y: 100 },
+    { x: 400, y: 100 },
+    { x: 400, y: 350 },
+    { x: 100, y: 350 },
+  ]);
+  const b: DocumentCorners = orderCorners([
+    { x: 250, y: 200 },
+    { x: 550, y: 200 },
+    { x: 550, y: 400 },
+    { x: 250, y: 400 },
+  ]);
+
+  const candidateA = makeScoredCandidate(
+    a,
+    0.25,
+    0.60,
+    [0.55, 0.50, 0.52, 0.48],
+  );
+  const candidateB = makeScoredCandidate(
+    b,
+    0.20,
+    0.65,
+    [0.60, 0.55, 0.58, 0.52],
+  );
+
+  // B is not contained in A and A is not contained in B.
+  const winner = selectBestCandidate([candidateA, candidateB]);
+  assert.ok(winner);
+  assert.deepEqual(
+    winner.detection.corners,
+    b,
+    "Highest confidence wins when no containment relationship exists",
+  );
+});
+
+test("area ratio exactly at 1.5× boundary → containment preference activates", () => {
+  const outer = makeScoredCandidate(
+    cardOuter,
+    0.15,
+    0.50,
+    [0.50, 0.44, 0.46, 0.42],
+  );
+  const inner = makeScoredCandidate(
+    photoInner,
+    0.10,  // 0.15 / 0.10 = 1.5 — exactly at boundary.
+    0.70,
+    [0.92, 0.88, 0.90, 0.86],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(
+    winner.detection.corners,
+    cardOuter,
+    "Containment should activate at exactly 1.5× area ratio",
+  );
+});
+
+test("area ratio below 1.5× → containment preference does not activate", () => {
+  const slightlyLarger: DocumentCorners = orderCorners([
+    { x: 140, y: 140 },
+    { x: 310, y: 142 },
+    { x: 308, y: 320 },
+    { x: 138, y: 318 },
+  ]);
+  const inner = makeScoredCandidate(
+    photoInner,
+    0.06,
+    0.72,
+    [0.92, 0.88, 0.90, 0.86],
+  );
+  const outer = makeScoredCandidate(
+    slightlyLarger,
+    0.08,  // 0.08 / 0.06 = 1.33 — below 1.5×.
+    0.55,
+    [0.50, 0.44, 0.46, 0.42],
+  );
+
+  const winner = selectBestCandidate([inner, outer]);
+  assert.ok(winner);
+  assert.deepEqual(
+    winner.detection.corners,
+    photoInner,
+    "Containment should not activate when area ratio is below 1.5×",
+  );
+});
+
+test("single candidate returns that candidate", () => {
+  const single = makeScoredCandidate(
+    cardOuter,
+    0.28,
+    0.60,
+    [0.55, 0.50, 0.52, 0.48],
+  );
+
+  const winner = selectBestCandidate([single]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardOuter);
+});
+
+test("empty candidate array returns null", () => {
+  assert.equal(selectBestCandidate([]), null);
+});
+
+test("strong inner rectangle with no outer candidate → inner wins", () => {
+  // Only one candidate — the inner rectangle. No outer boundary at all.
+  const inner = makeScoredCandidate(
+    photoInner,
+    0.06,
+    0.75,
+    [0.92, 0.88, 0.90, 0.86],
+  );
+
+  const winner = selectBestCandidate([inner]);
+  assert.ok(winner);
+  assert.deepEqual(
+    winner.detection.corners,
+    photoInner,
+    "Should not reject an inner candidate when it is the only legitimate detection",
+  );
+});
+
+test("existing A4 document scoring continues to work", () => {
+  const a4Candidate = validateQuadrilateral(
+    [
+      { x: 100, y: 70 },
+      { x: 540, y: 80 },
+      { x: 520, y: 410 },
+      { x: 110, y: 400 },
+    ],
+    frameWidth,
+    frameHeight,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+
+  assert.ok(a4Candidate);
+  assert.ok(a4Candidate.metrics.areaRatio > 0.4);
+
+  const score = scoreDocumentCandidate(
+    a4Candidate,
+    undefined,
+    createBoundaryEvidence([0.72, 0.65, 0.68, 0.60]),
+  );
+  assert.ok(score > 0.5, "A4 document should score above threshold");
+});
+
+test("existing passport single-page detection continues to work", () => {
+  const passportPage = validateQuadrilateral(
+    [
+      { x: 340, y: 100 },
+      { x: 510, y: 105 },
+      { x: 505, y: 380 },
+      { x: 335, y: 375 },
+    ],
+    frameWidth,
+    frameHeight,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+
+  assert.ok(passportPage);
+  assert.ok(passportPage.metrics.areaRatio > 0.1);
+  assert.ok(passportPage.metrics.angleScore > 0.9);
 });
 

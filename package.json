@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test src/lib/camera/frame-sampler.test.mts src/lib/detection/geometry.test.mts src/lib/quality/document-quality.test.mts src/lib/stability/document-stability.test.mts src/lib/capture/capture-controller.test.mts src/lib/overlay/video-coordinate-mapping.test.mts src/lib/capture-processing/coordinate-mapping.test.mts src/lib/capture-processing/perspective-transform.test.mts src/lib/capture-processing/enhancement.test.mts"
+    "test": "node --test src/lib/camera/frame-sampler.test.mts src/lib/detection/geometry.test.mts src/lib/detection/corner-refinement.test.mts src/lib/quality/document-quality.test.mts src/lib/stability/document-stability.test.mts src/lib/capture/capture-controller.test.mts src/lib/overlay/video-coordinate-mapping.test.mts src/lib/capture-processing/coordinate-mapping.test.mts src/lib/capture-processing/perspective-transform.test.mts src/lib/capture-processing/enhancement.test.mts"
   },
   "dependencies": {
     "@opencvjs/web": "^5.0.0-release.2",

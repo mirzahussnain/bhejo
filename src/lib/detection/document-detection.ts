@@ -1,6 +1,7 @@
 import type { OpenCV } from "@opencvjs/web";
 import type { AnalysisFrame } from "@/lib/camera/frame-sampler";
 import {
+  isContainedWithin,
   polygonArea,
   validateQuadrilateral,
   type DocumentCorners,
@@ -16,6 +17,11 @@ import {
   type CandidateEvidenceConfig,
   type EdgeMap,
 } from "./candidate-evidence.ts";
+import {
+  refineCorners,
+  type CornerRefinementConfig,
+  DEFAULT_CORNER_REFINEMENT_CONFIG,
+} from "./corner-refinement.ts";
 
 export interface DocumentDetection {
   readonly corners: DocumentCorners;
@@ -27,6 +33,12 @@ export interface DocumentDetection {
 
 export interface DocumentDetectorConfig
   extends QuadrilateralValidationConfig {
+  readonly claheClipLimit: number;
+  readonly claheTileSize: number;
+  readonly useBilateralFilter: boolean;
+  readonly bilateralDiameter: number;
+  readonly bilateralSigmaColor: number;
+  readonly bilateralSigmaSpace: number;
   readonly blurKernelSize: number;
   readonly cannyLowThreshold: number;
   readonly cannyHighThreshold: number;
@@ -41,6 +53,8 @@ export interface DocumentDetectorConfig
   readonly minReconstructedEdgeSupport: number;
   readonly standardEvidence: CandidateEvidenceConfig;
   readonly reconstructionEvidence: CandidateEvidenceConfig;
+  readonly cornerRefinement: CornerRefinementConfig;
+  readonly minContainmentAreaRatio: number;
 }
 
 export type DocumentCandidateStrategy =
@@ -56,6 +70,12 @@ export interface DocumentDetectionRun {
 }
 
 export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
+  claheClipLimit: 2.0,
+  claheTileSize: 8,
+  useBilateralFilter: false,
+  bilateralDiameter: 7,
+  bilateralSigmaColor: 50,
+  bilateralSigmaSpace: 50,
   blurKernelSize: 5,
   cannyLowThreshold: 30,
   cannyHighThreshold: 100,
@@ -97,6 +117,8 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
     strongSideSupport: 0.45,
     minimumStrongSideCount: 3,
   },
+  cornerRefinement: DEFAULT_CORNER_REFINEMENT_CONFIG,
+  minContainmentAreaRatio: 1.5,
 };
 
 function clampScore(value: number): number {
@@ -137,10 +159,11 @@ function readContourPoints(contour: OpenCV.Mat): Point[] {
 interface ScoredDocumentCandidate {
   readonly detection: DocumentDetection;
   readonly strategy: DocumentCandidateStrategy;
+  readonly boundaryEvidence: CandidateBoundaryEvidence;
 }
 
 interface ContourSearchResult {
-  readonly candidate: ScoredDocumentCandidate | null;
+  readonly candidates: readonly ScoredDocumentCandidate[];
   readonly contourCount: number;
   readonly quadrilateralCount: number;
 }
@@ -200,6 +223,7 @@ function createScoredCandidate(
 ): ScoredDocumentCandidate {
   return {
     strategy,
+    boundaryEvidence,
     detection: {
       corners: candidate.corners,
       confidence: scoreDocumentCandidate(
@@ -217,13 +241,81 @@ function createScoredCandidate(
   };
 }
 
-function chooseCandidate(
-  current: ScoredDocumentCandidate | null,
-  next: ScoredDocumentCandidate,
-): ScoredDocumentCandidate {
-  return !current || next.detection.confidence > current.detection.confidence
-    ? next
-    : current;
+/**
+ * Selects the best candidate from a set using containment-aware reasoning.
+ *
+ * When the highest-confidence candidate is geometrically contained inside
+ * another candidate that has sufficient boundary evidence, the enclosing
+ * candidate is preferred — it likely represents the physical document
+ * boundary rather than internal content (photo, chip, barcode, MRZ).
+ *
+ * The enclosing candidate must:
+ * - be at least minContainmentAreaRatio × the inner candidate's area
+ * - pass balanced boundary evidence checks
+ *
+ * If multiple enclosing candidates qualify, the one with the highest
+ * confidence is chosen (most plausible, not blindly largest).
+ */
+export function selectBestCandidate(
+  candidates: readonly ScoredDocumentCandidate[],
+  config: Pick<
+    DocumentDetectorConfig,
+    "minContainmentAreaRatio" | "standardEvidence"
+  > = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+): ScoredDocumentCandidate | null {
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  // Sort descending by confidence to start with the best raw candidate.
+  const sorted = [...candidates].sort(
+    (a, b) => b.detection.confidence - a.detection.confidence,
+  );
+
+  const best = sorted[0];
+
+  // Check every candidate in the set: if it contains the current best
+  // and meets the evidence/size requirements, it should be preferred.
+  const qualifyingEnclosers = sorted.filter((encloser) => {
+    if (encloser === best) {
+      return false;
+    }
+
+    // The enclosing candidate must be significantly larger.
+    // Small epsilon prevents floating-point multiplication imprecision
+    // from rejecting exact boundary cases (e.g. 0.10 * 1.5 = 0.15000000000000002).
+    const areaThreshold =
+      best.detection.areaRatio * config.minContainmentAreaRatio;
+    if (encloser.detection.areaRatio + 1e-9 < areaThreshold) {
+      return false;
+    }
+
+    // The enclosing candidate must have balanced boundary evidence.
+    if (
+      !hasBalancedBoundaryEvidence(
+        encloser.boundaryEvidence,
+        config.standardEvidence,
+      )
+    ) {
+      return false;
+    }
+
+    // The best candidate must be geometrically contained.
+    return isContainedWithin(
+      best.detection.corners,
+      encloser.detection.corners,
+    );
+  });
+
+  if (qualifyingEnclosers.length === 0) {
+    return best;
+  }
+
+  // Among qualifying enclosers, choose the one with highest confidence
+  // (most plausible boundary, not blindly the largest).
+  return qualifyingEnclosers.reduce((a, b) =>
+    b.detection.confidence > a.detection.confidence ? b : a,
+  );
 }
 
 function findContourCandidates(
@@ -246,7 +338,7 @@ function findContourCandidates(
       cv.CHAIN_APPROX_SIMPLE,
     );
 
-    let candidate: ScoredDocumentCandidate | null = null;
+    const candidates: ScoredDocumentCandidate[] = [];
     let quadrilateralCount = 0;
 
     for (let index = 0; index < contours.size(); index += 1) {
@@ -300,8 +392,7 @@ function findContourCandidates(
             continue;
           }
 
-          candidate = chooseCandidate(
-            candidate,
+          candidates.push(
             createScoredCandidate(quadrilateral, boundaryEvidence, strategy, config),
           );
         }
@@ -345,8 +436,7 @@ function findContourCandidates(
         }
 
         quadrilateralCount += 1;
-        candidate = chooseCandidate(
-          candidate,
+        candidates.push(
           createScoredCandidate(
             reconstructed,
             boundaryEvidence,
@@ -361,7 +451,7 @@ function findContourCandidates(
     }
 
     return {
-      candidate,
+      candidates,
       contourCount: contours.size(),
       quadrilateralCount,
     };
@@ -369,6 +459,98 @@ function findContourCandidates(
     hierarchy.delete();
     contours.delete();
   }
+}
+
+/**
+ * Applies CLAHE + blur preprocessing, returning the blurred grayscale mat.
+ * The caller must delete the returned claheResult mat.
+ */
+function preprocessFrame(
+  cv: typeof OpenCV,
+  grayscale: OpenCV.Mat,
+  blurred: OpenCV.Mat,
+  config: DocumentDetectorConfig,
+): OpenCV.Mat | null {
+  let claheResult: OpenCV.Mat | null = null;
+
+  try {
+    const clahe = new cv.CLAHE(config.claheClipLimit, new cv.Size(config.claheTileSize, config.claheTileSize));
+    claheResult = new cv.Mat();
+    clahe.apply(grayscale, claheResult);
+    clahe.delete();
+  } catch {
+    // CLAHE may not be available in some OpenCV WASM builds.
+    // Fall back to raw grayscale.
+    claheResult?.delete();
+    claheResult = null;
+  }
+
+  const blurSource = claheResult ?? grayscale;
+
+  if (config.useBilateralFilter) {
+    try {
+      cv.bilateralFilter(
+        blurSource,
+        blurred,
+        config.bilateralDiameter,
+        config.bilateralSigmaColor,
+        config.bilateralSigmaSpace,
+      );
+    } catch {
+      // bilateralFilter may not be available or may fail on some inputs.
+      cv.GaussianBlur(
+        blurSource,
+        blurred,
+        new cv.Size(config.blurKernelSize, config.blurKernelSize),
+        0,
+        0,
+        cv.BORDER_DEFAULT,
+      );
+    }
+  } else {
+    cv.GaussianBlur(
+      blurSource,
+      blurred,
+      new cv.Size(config.blurKernelSize, config.blurKernelSize),
+      0,
+      0,
+      cv.BORDER_DEFAULT,
+    );
+  }
+
+  return claheResult;
+}
+
+/**
+ * Refines the corners of a detection result using line-fitting and
+ * sub-pixel refinement. Returns the original detection unchanged if
+ * refinement produces a worse result.
+ */
+function refineDetection(
+  cv: typeof OpenCV,
+  detection: DocumentDetection,
+  edgeMap: EdgeMap,
+  grayscale: OpenCV.Mat,
+  config: DocumentDetectorConfig,
+): DocumentDetection {
+  const refined = refineCorners(
+    cv,
+    detection.corners,
+    edgeMap,
+    edgeMap.width,
+    edgeMap.height,
+    config,
+    config.cornerRefinement,
+  );
+
+  if (refined === detection.corners) {
+    return detection;
+  }
+
+  return {
+    ...detection,
+    corners: refined,
+  };
 }
 
 export function runDocumentDetection(
@@ -392,16 +574,11 @@ export function runDocumentDetection(
     ),
   );
 
+  let claheResult: OpenCV.Mat | null = null;
+
   try {
     cv.cvtColor(source, grayscale, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(
-      grayscale,
-      blurred,
-      new cv.Size(config.blurKernelSize, config.blurKernelSize),
-      0,
-      0,
-      cv.BORDER_DEFAULT,
-    );
+    claheResult = preprocessFrame(cv, grayscale, blurred, config);
     cv.Canny(
       blurred,
       edges,
@@ -427,12 +604,28 @@ export function runDocumentDetection(
       false,
     );
 
-    if (standardResult.candidate) {
+    const standardWinner = selectBestCandidate(
+      standardResult.candidates,
+      config,
+    );
+
+    if (standardWinner) {
+      const edgeMap: EdgeMap = {
+        data: edges.data,
+        width: frame.width,
+        height: frame.height,
+      };
       return {
-        detection: standardResult.candidate.detection,
+        detection: refineDetection(
+          cv,
+          standardWinner.detection,
+          edgeMap,
+          grayscale,
+          config,
+        ),
         contourCount: standardResult.contourCount,
         quadrilateralCount: standardResult.quadrilateralCount,
-        strategy: standardResult.candidate.strategy,
+        strategy: standardWinner.strategy,
       };
     }
 
@@ -461,14 +654,30 @@ export function runDocumentDetection(
       true,
     );
 
+    const fallbackWinner = selectBestCandidate(
+      fallbackResult.candidates,
+      config,
+    );
+    const fallbackDetection = fallbackWinner?.detection ?? null;
+    const refinedFallback = fallbackDetection
+      ? refineDetection(
+          cv,
+          fallbackDetection,
+          { data: edges.data, width: frame.width, height: frame.height },
+          grayscale,
+          config,
+        )
+      : null;
+
     return {
-      detection: fallbackResult.candidate?.detection ?? null,
+      detection: refinedFallback,
       contourCount: standardResult.contourCount + fallbackResult.contourCount,
       quadrilateralCount:
         standardResult.quadrilateralCount + fallbackResult.quadrilateralCount,
-      strategy: fallbackResult.candidate?.strategy ?? null,
+      strategy: fallbackWinner?.strategy ?? null,
     };
   } finally {
+    claheResult?.delete();
     fallbackKernel.delete();
     standardKernel.delete();
     edges.delete();
