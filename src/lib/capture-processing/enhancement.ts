@@ -19,34 +19,43 @@ export interface ScanEnhancementConfig {
   readonly targetLuminance?: number;
   readonly brightnessStrength?: number;
   readonly maximumBrightnessAdjustment?: number;
+  readonly illuminationNormalization?: boolean;
+  readonly illuminationStrength?: number;
+  readonly denoisingStrength?: number;
 }
 
 export type EnhancementConfig = ScanEnhancementConfig;
 
 export const DEFAULT_PHOTO_DOCUMENT_ENHANCEMENT_CONFIG: ScanEnhancementConfig = {
   profile: "photo-document",
-  claheClipLimit: 1.5,
+  claheClipLimit: 1.6,
   claheGridSize: 8,
-  sharpeningAmount: 0.35,
-  sharpeningRadius: 1.0,
+  sharpeningAmount: 0.48,
+  sharpeningRadius: 1.2,
   brightnessAdjustment: 0,
   contrast: 1.0,
-  targetLuminance: 145,
+  targetLuminance: 148,
   brightnessStrength: 0.18,
   maximumBrightnessAdjustment: 10,
+  illuminationNormalization: true,
+  illuminationStrength: 0.18,
+  denoisingStrength: 0.12,
 };
 
 export const DEFAULT_DOCUMENT_ENHANCEMENT_CONFIG: ScanEnhancementConfig = {
   profile: "document",
   claheClipLimit: 2.2,
   claheGridSize: 8,
-  sharpeningAmount: 0.65,
-  sharpeningRadius: 1.2,
+  sharpeningAmount: 0.68,
+  sharpeningRadius: 1.3,
   brightnessAdjustment: 0,
   contrast: 1.0,
   targetLuminance: 155,
   brightnessStrength: 0.22,
   maximumBrightnessAdjustment: 15,
+  illuminationNormalization: true,
+  illuminationStrength: 0.22,
+  denoisingStrength: 0.16,
 };
 
 export const DEFAULT_SCAN_ENHANCEMENT_CONFIG: ScanEnhancementConfig =
@@ -109,6 +118,20 @@ export function resolveEnhancementConfig(
       Number.isFinite(config.maximumBrightnessAdjustment)
         ? config.maximumBrightnessAdjustment
         : base.maximumBrightnessAdjustment,
+    illuminationNormalization:
+      typeof config?.illuminationNormalization === "boolean"
+        ? config.illuminationNormalization
+        : base.illuminationNormalization,
+    illuminationStrength:
+      typeof config?.illuminationStrength === "number" &&
+      Number.isFinite(config.illuminationStrength)
+        ? Math.max(0, Math.min(1, config.illuminationStrength))
+        : base.illuminationStrength,
+    denoisingStrength:
+      typeof config?.denoisingStrength === "number" &&
+      Number.isFinite(config.denoisingStrength)
+        ? Math.max(0, Math.min(1, config.denoisingStrength))
+        : base.denoisingStrength,
   };
 }
 
@@ -243,6 +266,10 @@ export function enhanceMatWithOpenCv(
     ) => void;
     delete?: () => void;
   } | null = null;
+  let illuminationBlur: InstanceType<typeof cv.Mat> | null = null;
+  let normalizedL: InstanceType<typeof cv.Mat> | null = null;
+  let denoisedL: InstanceType<typeof cv.Mat> | null = null;
+  let denoisedBlend: InstanceType<typeof cv.Mat> | null = null;
   let claheL: InstanceType<typeof cv.Mat> | null = null;
   let blurredL: InstanceType<typeof cv.Mat> | null = null;
   let sharpenedL: InstanceType<typeof cv.Mat> | null = null;
@@ -261,6 +288,29 @@ export function enhanceMatWithOpenCv(
 
     let activeL = lChannel;
 
+    // Stage 1: Illumination Normalization on L (Gentle Shadow Flattening)
+    if (config.illuminationNormalization && (config.illuminationStrength ?? 0) > 0) {
+      illuminationBlur = new cv.Mat();
+      normalizedL = new cv.Mat();
+      // Large-scale Gaussian blur captures the low-frequency illumination field across the document
+      cv.GaussianBlur(activeL, illuminationBlur, new cv.Size(0, 0), 32, 32, cv.BORDER_REPLICATE);
+      const meanL = cv.mean(activeL)[0];
+      const strength = config.illuminationStrength ?? 0.18;
+      cv.addWeighted(activeL, 1.0, illuminationBlur, -strength, meanL * strength, normalizedL);
+      activeL = normalizedL;
+    }
+
+    // Stage 2: Mild Pre-Denoising on L (Prevents grain amplification in flat areas)
+    if ((config.denoisingStrength ?? 0) > 0) {
+      denoisedL = new cv.Mat();
+      denoisedBlend = new cv.Mat();
+      cv.GaussianBlur(activeL, denoisedL, new cv.Size(3, 3), 0.8, 0.8, cv.BORDER_DEFAULT);
+      const strength = Math.min(0.5, config.denoisingStrength ?? 0.12);
+      cv.addWeighted(activeL, 1 - strength, denoisedL, strength, 0, denoisedBlend);
+      activeL = denoisedBlend;
+    }
+
+    // Stage 3: Local Contrast Enhancement (CLAHE on L)
     if (config.claheClipLimit > 0) {
       const openCvWithClahe = cv as unknown as {
         createCLAHE?: (
@@ -304,6 +354,7 @@ export function enhanceMatWithOpenCv(
       }
     }
 
+    // Stage 4: Luminance-Only Unsharp Masking (USM)
     if (config.sharpeningAmount > 0) {
       blurredL = new cv.Mat();
       cv.GaussianBlur(
@@ -345,6 +396,10 @@ export function enhanceMatWithOpenCv(
     if (aChannel) aChannel.delete();
     if (bChannel) bChannel.delete();
     if (claheObj && typeof claheObj.delete === "function") claheObj.delete();
+    if (illuminationBlur) illuminationBlur.delete();
+    if (normalizedL) normalizedL.delete();
+    if (denoisedL) denoisedL.delete();
+    if (denoisedBlend) denoisedBlend.delete();
     if (claheL) claheL.delete();
     if (blurredL) blurredL.delete();
     if (sharpenedL) sharpenedL.delete();

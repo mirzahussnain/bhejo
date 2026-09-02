@@ -19,7 +19,7 @@ import {
   type PerspectiveTransformConfig,
 } from "./perspective-transform.ts";
 
-export const DEFAULT_JPEG_QUALITY = 0.92;
+export const DEFAULT_JPEG_QUALITY = 0.94;
 
 export interface CapturedFrame {
   readonly canvas: HTMLCanvasElement;

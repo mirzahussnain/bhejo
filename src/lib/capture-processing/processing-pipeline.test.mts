@@ -11,7 +11,7 @@ import {
 
 test("resolves JPEG quality defaults and respects valid bounds", () => {
   assert.equal(resolveJpegQuality(), DEFAULT_JPEG_QUALITY);
-  assert.equal(resolveJpegQuality(undefined), 0.92);
+  assert.equal(resolveJpegQuality(undefined), 0.94);
   assert.equal(resolveJpegQuality(0.85), 0.85);
   assert.equal(resolveJpegQuality(0.95), 0.95);
   assert.equal(resolveJpegQuality(1.0), 1.0);

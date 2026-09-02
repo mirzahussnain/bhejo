@@ -18,6 +18,9 @@ test("resolves default photo-document enhancement profile correctly", () => {
   assert.equal(config.sharpeningAmount, DEFAULT_PHOTO_DOCUMENT_ENHANCEMENT_CONFIG.sharpeningAmount);
   assert.equal(config.claheGridSize, 8);
   assert.equal(config.contrast, 1.0);
+  assert.equal(config.illuminationNormalization, true);
+  assert.equal(config.illuminationStrength, 0.18);
+  assert.equal(config.denoisingStrength, 0.12);
 });
 
 test("resolves document enhancement profile with higher contrast and sharpening", () => {
@@ -27,6 +30,9 @@ test("resolves document enhancement profile with higher contrast and sharpening"
   assert.equal(config.claheClipLimit, DEFAULT_DOCUMENT_ENHANCEMENT_CONFIG.claheClipLimit);
   assert.ok(config.claheClipLimit > DEFAULT_PHOTO_DOCUMENT_ENHANCEMENT_CONFIG.claheClipLimit);
   assert.ok(config.sharpeningAmount > DEFAULT_PHOTO_DOCUMENT_ENHANCEMENT_CONFIG.sharpeningAmount);
+  assert.equal(config.illuminationNormalization, true);
+  assert.equal(config.illuminationStrength, 0.22);
+  assert.equal(config.denoisingStrength, 0.16);
 });
 
 test("merges custom parameter overrides without corrupting other defaults", () => {
@@ -34,12 +40,16 @@ test("merges custom parameter overrides without corrupting other defaults", () =
     profile: "photo-document",
     claheClipLimit: 1.8,
     sharpeningAmount: 0.4,
+    illuminationStrength: 0.25,
+    denoisingStrength: 0.08,
   });
 
   assert.equal(config.profile, "photo-document");
   assert.equal(config.claheClipLimit, 1.8);
   assert.equal(config.sharpeningAmount, 0.4);
   assert.equal(config.claheGridSize, 8);
+  assert.equal(config.illuminationStrength, 0.25);
+  assert.equal(config.denoisingStrength, 0.08);
 });
 
 test("calculates luminance with standard Rec. 709 / sRGB coefficients", () => {
@@ -61,7 +71,7 @@ test("calculates average luminance across an entire pixel buffer", () => {
 test("limits brightness normalization to a conservative adjustment", () => {
   assert.equal(calculateBrightnessAdjustment(0), 10);
   assert.equal(calculateBrightnessAdjustment(255), -10);
-  assert.equal(calculateBrightnessAdjustment(145), 0);
+  assert.equal(calculateBrightnessAdjustment(148), 0);
 });
 
 test("enhances colour pixels without producing invalid channel values", () => {
