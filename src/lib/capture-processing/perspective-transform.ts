@@ -79,8 +79,8 @@ export function calculatePerspectiveOutputDimensions(
   const bottomWidth = distance(corners[3], corners[2]);
   const leftHeight = distance(corners[0], corners[3]);
   const rightHeight = distance(corners[1], corners[2]);
-  const sourceWidth = (topWidth + bottomWidth) / 2;
-  const sourceHeight = (leftHeight + rightHeight) / 2;
+  const sourceWidth = Math.max(topWidth, bottomWidth);
+  const sourceHeight = Math.max(leftHeight, rightHeight);
 
   if (
     !Number.isFinite(sourceWidth) ||
@@ -156,7 +156,7 @@ export function warpPerspectiveToCanvas(
       warped,
       transform,
       new cv.Size(output.width, output.height),
-      cv.INTER_LINEAR,
+      cv.INTER_CUBIC,
       cv.BORDER_REPLICATE,
       new cv.Scalar(),
     );

@@ -4,8 +4,17 @@ const preferredCameraConstraints: MediaStreamConstraints = {
   audio: false,
   video: {
     facingMode: { ideal: "environment" },
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
   },
 };
+
+export function getVideoTrackSettings(
+  stream: MediaStream,
+): MediaTrackSettings | null {
+  const [videoTrack] = stream.getVideoTracks();
+  return videoTrack ? videoTrack.getSettings() : null;
+}
 
 const fallbackCameraConstraints: MediaStreamConstraints = {
   audio: false,

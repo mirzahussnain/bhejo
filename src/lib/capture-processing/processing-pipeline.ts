@@ -1,22 +1,39 @@
-import type { DocumentCorners } from "@/lib/detection/geometry";
-import { loadOpenCv } from "@/lib/detection/opencv-loader";
+import type { DocumentCorners } from "../detection/geometry.ts";
+import { loadOpenCv } from "../detection/opencv-loader.ts";
 import {
   createFullFrameCoordinateMapping,
   mapAnalysisCornersToCapture,
   type FrameDimensions,
-} from "./coordinate-mapping";
-import { enhanceCanvas } from "./enhancement";
+} from "./coordinate-mapping.ts";
 import {
+  enhanceCanvasWithOpenCv,
+  enhanceCanvas,
+  resolveEnhancementConfig,
+  type ScanEnhancementConfig,
+  type ScanQualityProfile,
+} from "./enhancement.ts";
+import {
+  DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
   warpPerspectiveToCanvas,
   type PerspectiveOutputDimensions,
-} from "./perspective-transform";
+  type PerspectiveTransformConfig,
+} from "./perspective-transform.ts";
+
+export const DEFAULT_JPEG_QUALITY = 0.92;
 
 export interface CapturedFrame {
   readonly canvas: HTMLCanvasElement;
   readonly sourceDimensions: FrameDimensions;
 }
 
-export interface CaptureProcessingInput {
+export interface ProcessingPipelineOptions {
+  readonly profile?: ScanQualityProfile;
+  readonly enhancementConfig?: Partial<ScanEnhancementConfig>;
+  readonly perspectiveConfig?: Partial<PerspectiveTransformConfig>;
+  readonly jpegQuality?: number;
+}
+
+export interface CaptureProcessingInput extends ProcessingPipelineOptions {
   readonly capturedFrame: CapturedFrame;
   readonly analysisCorners: DocumentCorners | null;
   readonly analysisDimensions: FrameDimensions | null;
@@ -31,7 +48,18 @@ export interface CaptureProcessingResult {
   readonly durationMs: number;
 }
 
-function canvasToJpeg(canvas: HTMLCanvasElement): Promise<Blob> {
+export function resolveJpegQuality(quality?: number): number {
+  if (typeof quality !== "number" || !Number.isFinite(quality)) {
+    return DEFAULT_JPEG_QUALITY;
+  }
+  return Math.max(0.1, Math.min(1.0, quality));
+}
+
+export function canvasToJpeg(
+  canvas: HTMLCanvasElement,
+  quality: number = DEFAULT_JPEG_QUALITY,
+): Promise<Blob> {
+  const resolvedQuality = resolveJpegQuality(quality);
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
@@ -42,7 +70,7 @@ function canvasToJpeg(canvas: HTMLCanvasElement): Promise<Blob> {
         reject(new Error("The scan could not be prepared."));
       },
       "image/jpeg",
-      0.92,
+      resolvedQuality,
     );
   });
 }
@@ -58,11 +86,29 @@ export async function processCapturedFrame(
   input: CaptureProcessingInput,
 ): Promise<CaptureProcessingResult> {
   const startedAt = performance.now();
-  const { capturedFrame, analysisCorners, analysisDimensions } = input;
+  const {
+    capturedFrame,
+    analysisCorners,
+    analysisDimensions,
+    profile = "photo-document",
+    enhancementConfig,
+    perspectiveConfig,
+    jpegQuality = DEFAULT_JPEG_QUALITY,
+  } = input;
+
+  const resolvedEnhancement = resolveEnhancementConfig(
+    { profile, ...enhancementConfig },
+    profile,
+  );
+  const resolvedPerspective: PerspectiveTransformConfig = {
+    ...DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
+    ...perspectiveConfig,
+  };
+  const resolvedQuality = resolveJpegQuality(jpegQuality);
 
   if (!analysisCorners || !analysisDimensions) {
     return {
-      image: await canvasToJpeg(capturedFrame.canvas),
+      image: await canvasToJpeg(capturedFrame.canvas, resolvedQuality),
       dimensions: getFallbackDimensions(capturedFrame),
       usedFallback: true,
       correctionFailed: true,
@@ -89,17 +135,22 @@ export async function processCapturedFrame(
       capturedFrame.canvas,
       captureCorners,
       outputCanvas,
+      resolvedPerspective,
     );
 
     let enhancementFailed = false;
     try {
-      enhanceCanvas(outputCanvas);
+      enhanceCanvasWithOpenCv(cv, outputCanvas, resolvedEnhancement);
     } catch {
-      enhancementFailed = true;
+      try {
+        enhanceCanvas(outputCanvas, resolvedEnhancement);
+      } catch {
+        enhancementFailed = true;
+      }
     }
 
     return {
-      image: await canvasToJpeg(outputCanvas),
+      image: await canvasToJpeg(outputCanvas, resolvedQuality),
       dimensions,
       usedFallback: false,
       correctionFailed: false,
@@ -108,7 +159,7 @@ export async function processCapturedFrame(
     };
   } catch {
     return {
-      image: await canvasToJpeg(capturedFrame.canvas),
+      image: await canvasToJpeg(capturedFrame.canvas, resolvedQuality),
       dimensions: getFallbackDimensions(capturedFrame),
       usedFallback: true,
       correctionFailed: true,

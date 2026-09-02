@@ -1,4 +1,4 @@
-import type { DocumentCorners, Point } from "@/lib/detection/geometry";
+import type { DocumentCorners, Point } from "../detection/geometry.ts";
 
 export interface FrameDimensions {
   readonly width: number;
