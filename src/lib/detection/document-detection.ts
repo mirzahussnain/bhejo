@@ -1,6 +1,9 @@
 import type { OpenCV } from "@opencvjs/web";
 import type { AnalysisFrame } from "@/lib/camera/frame-sampler";
 import {
+  DEFAULT_CONTAINMENT_TOLERANCE_PX,
+  calculateBoundingBoxIoU,
+  cornersBoundingBox,
   isContainedWithin,
   polygonArea,
   validateQuadrilateral,
@@ -55,6 +58,7 @@ export interface DocumentDetectorConfig
   readonly reconstructionEvidence: CandidateEvidenceConfig;
   readonly cornerRefinement: CornerRefinementConfig;
   readonly minContainmentAreaRatio: number;
+  readonly containmentTolerancePx: number;
 }
 
 export type DocumentCandidateStrategy =
@@ -93,12 +97,14 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   minEdgeConsistency: 0.16,
   boundaryTargetRatio: 0.035,
   targetAreaRatio: 0.3,
-  maxReconstructedAreaRatio: 0.5,
+  // Permits close/fully-framed documents occupying up to ~88% of the analysis frame
+  // to be reconstructed when rounded corners or lighting prevent an exact 4-vertex polygon.
+  maxReconstructedAreaRatio: 0.88,
   minReconstructedContourFill: 0.42,
   minReconstructedEdgeSupport: 0.46,
   standardEvidence: {
     samplesPerSide: 18,
-    edgeSearchRadiusPx: 2,
+    edgeSearchRadiusPx: 3,
     minimumSideSupport: 0.12,
     minimumAverageSupport: 0.38,
     strongSideSupport: 0.32,
@@ -106,7 +112,7 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   },
   reconstructionEvidence: {
     samplesPerSide: 22,
-    edgeSearchRadiusPx: 2,
+    edgeSearchRadiusPx: 3,
     // Lowered from 0.2/0.54 to allow passport pages where the outer edge
     // (away from the fold) has modest contrast against the surface.
     // The other reconstruction guards (maxReconstructedAreaRatio,
@@ -119,6 +125,7 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   },
   cornerRefinement: DEFAULT_CORNER_REFINEMENT_CONFIG,
   minContainmentAreaRatio: 1.5,
+  containmentTolerancePx: DEFAULT_CONTAINMENT_TOLERANCE_PX,
 };
 
 function clampScore(value: number): number {
@@ -256,65 +263,124 @@ function createScoredCandidate(
  * If multiple enclosing candidates qualify, the one with the highest
  * confidence is chosen (most plausible, not blindly largest).
  */
+const CONTINUITY_IOU_THRESHOLD = 0.60;
+const CONTINUITY_CONFIDENCE_BOOST = 0.06;
+
+function getCandidateConfidence(
+  candidate: ScoredDocumentCandidate,
+  previousCorners?: DocumentCorners | null,
+): number {
+  if (!previousCorners) {
+    return candidate.detection.confidence;
+  }
+
+  const prevBox = cornersBoundingBox(previousCorners);
+  const candBox = cornersBoundingBox(candidate.detection.corners);
+  const iou = calculateBoundingBoxIoU(candBox, prevBox);
+
+  if (iou >= CONTINUITY_IOU_THRESHOLD) {
+    return clampScore(candidate.detection.confidence + CONTINUITY_CONFIDENCE_BOOST);
+  }
+
+  return candidate.detection.confidence;
+}
+
+/**
+ * Selects the winning document candidate using a 3-Tier Semantic Hierarchy with Temporal Continuity:
+ *
+ * Tier 1: Identify all candidate containment relationships across the pool.
+ * A candidate B is classified as an "internal feature" if a significantly larger candidate A
+ * with balanced boundary evidence geometrically encloses B.
+ *
+ * Tier 2: Separate candidates into outer document candidates vs. internal feature candidates.
+ *
+ * Tier 3: If one or more plausible enclosing outer candidates exist, choose the highest effective-confidence
+ * candidate among the outer candidates (ensuring the enclosing physical boundary always defeats
+ * internal photos/chips/barcodes).
+ *
+ * Temporal Continuity: When previousCorners is provided (from the preceding frame's detection),
+ * candidates with high geometric continuity (IoU >= 0.60) receive a modest confidence boost (+0.06),
+ * preventing frame-to-frame candidate flickering between outer card and internal features.
+ *
+ * If no containment exists (e.g. single standalone receipt or separate pages), the highest-confidence
+ * candidate wins normally.
+ */
 export function selectBestCandidate(
   candidates: readonly ScoredDocumentCandidate[],
   config: Pick<
     DocumentDetectorConfig,
-    "minContainmentAreaRatio" | "standardEvidence"
+    "minContainmentAreaRatio" | "standardEvidence" | "containmentTolerancePx"
   > = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  previousCorners?: DocumentCorners | null,
 ): ScoredDocumentCandidate | null {
   if (candidates.length === 0) {
     return null;
   }
 
-  // Sort descending by confidence to start with the best raw candidate.
-  const sorted = [...candidates].sort(
-    (a, b) => b.detection.confidence - a.detection.confidence,
-  );
+  const tolerance =
+    config.containmentTolerancePx ?? DEFAULT_CONTAINMENT_TOLERANCE_PX;
+  const minContainmentAreaRatio = config.minContainmentAreaRatio ?? 1.35;
 
-  const best = sorted[0];
+  // Identify all containment relationships across the entire candidate pool.
+  const internalFeatureCandidates = new Set<ScoredDocumentCandidate>();
 
-  // Check every candidate in the set: if it contains the current best
-  // and meets the evidence/size requirements, it should be preferred.
-  const qualifyingEnclosers = sorted.filter((encloser) => {
-    if (encloser === best) {
-      return false;
-    }
-
-    // The enclosing candidate must be significantly larger.
-    // Small epsilon prevents floating-point multiplication imprecision
-    // from rejecting exact boundary cases (e.g. 0.10 * 1.5 = 0.15000000000000002).
-    const areaThreshold =
-      best.detection.areaRatio * config.minContainmentAreaRatio;
-    if (encloser.detection.areaRatio + 1e-9 < areaThreshold) {
-      return false;
-    }
-
-    // The enclosing candidate must have balanced boundary evidence.
+  for (const candidateA of candidates) {
+    // An enclosing candidate must have balanced boundary evidence.
     if (
       !hasBalancedBoundaryEvidence(
-        encloser.boundaryEvidence,
+        candidateA.boundaryEvidence,
         config.standardEvidence,
       )
     ) {
-      return false;
+      continue;
     }
 
-    // The best candidate must be geometrically contained.
-    return isContainedWithin(
-      best.detection.corners,
-      encloser.detection.corners,
-    );
-  });
+    for (const candidateB of candidates) {
+      if (candidateA === candidateB) {
+        continue;
+      }
 
-  if (qualifyingEnclosers.length === 0) {
-    return best;
+      // Check if A is significantly larger than B
+      const areaThreshold =
+        candidateB.detection.areaRatio * minContainmentAreaRatio;
+      if (candidateA.detection.areaRatio + 1e-9 < areaThreshold) {
+        continue;
+      }
+
+      // Check if A geometrically encloses B
+      if (
+        isContainedWithin(
+          candidateB.detection.corners,
+          candidateA.detection.corners,
+          tolerance,
+        )
+      ) {
+        internalFeatureCandidates.add(candidateB);
+      }
+    }
   }
 
-  // Among qualifying enclosers, choose the one with highest confidence
-  // (most plausible boundary, not blindly the largest).
-  return qualifyingEnclosers.reduce((a, b) =>
-    b.detection.confidence > a.detection.confidence ? b : a,
+  // Outer candidates are those not enclosed as an internal feature of another candidate
+  const outerCandidates = candidates.filter(
+    (c) => !internalFeatureCandidates.has(c),
+  );
+
+  // If there are valid outer candidates, choose the highest effective-confidence one among them
+  if (outerCandidates.length > 0) {
+    return outerCandidates.reduce((best, current) =>
+      getCandidateConfidence(current, previousCorners) >
+      getCandidateConfidence(best, previousCorners)
+        ? current
+        : best,
+    );
+  }
+
+  // Fallback: If all candidates are nested inside each other, choose the highest confidence candidate.
+  return candidates.reduce((best, current) =>
+    getCandidateConfidence(current, previousCorners) >
+    getCandidateConfidence(best, previousCorners)
+      ? current
+      : best,
   );
 }
 
@@ -557,14 +623,19 @@ export function runDocumentDetection(
   cv: typeof OpenCV,
   frame: AnalysisFrame,
   config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  previousCorners?: DocumentCorners | null,
 ): DocumentDetectionRun {
   const source = cv.imread(frame.canvas);
+
   const grayscale = new cv.Mat();
   const blurred = new cv.Mat();
   const edges = new cv.Mat();
   const standardKernel = cv.getStructuringElement(
     cv.MORPH_RECT,
-    new cv.Size(config.morphologyKernelSize, config.morphologyKernelSize),
+    new cv.Size(
+      config.morphologyKernelSize,
+      config.morphologyKernelSize,
+    ),
   );
   const fallbackKernel = cv.getStructuringElement(
     cv.MORPH_RECT,
@@ -607,6 +678,7 @@ export function runDocumentDetection(
     const standardWinner = selectBestCandidate(
       standardResult.candidates,
       config,
+      previousCorners,
     );
 
     if (standardWinner) {
@@ -657,6 +729,7 @@ export function runDocumentDetection(
     const fallbackWinner = selectBestCandidate(
       fallbackResult.candidates,
       config,
+      previousCorners,
     );
     const fallbackDetection = fallbackWinner?.detection ?? null;
     const refinedFallback = fallbackDetection
@@ -691,6 +764,7 @@ export function detectDocument(
   cv: typeof OpenCV,
   frame: AnalysisFrame,
   config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  previousCorners?: DocumentCorners | null,
 ): DocumentDetection | null {
-  return runDocumentDetection(cv, frame, config).detection;
+  return runDocumentDetection(cv, frame, config, previousCorners).detection;
 }

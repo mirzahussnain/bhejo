@@ -287,14 +287,136 @@ export function isPointInsideConvexQuad(
   return positiveCount === 0 || negativeCount === 0;
 }
 
+export const DEFAULT_CONTAINMENT_TOLERANCE_PX = 16;
+
 /**
- * Tests whether all four corners of the inner quadrilateral lie
- * inside (or on the boundary of) the outer convex quadrilateral.
+ * Tests whether an inner quadrilateral is geometrically contained within an outer convex quadrilateral.
+ *
+ * Handles rounded document corners and polygon approximation chamfering by:
+ * 1. Testing that the centroid of the inner quadrilateral lies inside the unexpanded outer quad.
+ * 2. Testing that all 4 inner corners lie within a bounded outward perpendicular tolerance
+ *    (tolerancePx) of all 4 outer quad edges.
+ *
+ * Genuinely separate, overlapping, or side-by-side quadrilaterals remain strictly rejected.
  */
 export function isContainedWithin(
   inner: DocumentCorners,
   outer: DocumentCorners,
-  epsilon = 1e-6,
+  tolerancePx: number = DEFAULT_CONTAINMENT_TOLERANCE_PX,
 ): boolean {
-  return inner.every((corner) => isPointInsideConvexQuad(corner, outer, epsilon));
+  // If all 4 corners are strictly inside the unexpanded quad, it is unconditionally contained.
+  if (inner.every((corner) => isPointInsideConvexQuad(corner, outer, 1e-4))) {
+    return true;
+  }
+
+  // If tolerance is non-positive, strict containment was required and failed.
+  if (tolerancePx <= 0) {
+    return false;
+  }
+
+  // Centroid of the inner quadrilateral MUST lie inside the unexpanded outer quad.
+  const innerCentroid: Point = {
+    x: (inner[0].x + inner[1].x + inner[2].x + inner[3].x) / 4,
+    y: (inner[0].y + inner[1].y + inner[2].y + inner[3].y) / 4,
+  };
+  if (!isPointInsideConvexQuad(innerCentroid, outer, 1e-4)) {
+    return false;
+  }
+
+  const outerCentroid: Point = {
+    x: (outer[0].x + outer[1].x + outer[2].x + outer[3].x) / 4,
+    y: (outer[0].y + outer[1].y + outer[2].y + outer[3].y) / 4,
+  };
+
+  // Compute outward edge normals for each side of the outer quadrilateral.
+  const edges: Array<{ start: Point; nx: number; ny: number }> = [];
+  for (let i = 0; i < 4; i += 1) {
+    const a = outer[i];
+    const b = outer[(i + 1) % 4];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) {
+      continue;
+    }
+
+    const ux = dx / len;
+    const uy = dy / len;
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+
+    // Outward normal pointing away from outer centroid
+    let nx = -uy;
+    let ny = ux;
+    const outDx = midX - outerCentroid.x;
+    const outDy = midY - outerCentroid.y;
+    if (nx * outDx + ny * outDy < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+
+    edges.push({ start: a, nx, ny });
+  }
+
+  if (edges.length < 3) {
+    return false;
+  }
+
+  // All 4 corners of inner must lie within tolerancePx outward perpendicular distance from every outer edge.
+  for (const corner of inner) {
+    for (const edge of edges) {
+      const outwardDist =
+        (corner.x - edge.start.x) * edge.nx +
+        (corner.y - edge.start.y) * edge.ny;
+      if (outwardDist > tolerancePx) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+export interface BoundingBox {
+  readonly minX: number;
+  readonly minY: number;
+  readonly maxX: number;
+  readonly maxY: number;
+}
+
+export function cornersBoundingBox(corners: DocumentCorners): BoundingBox {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const p of corners) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  return { minX, minY, maxX, maxY };
+}
+
+export function calculateBoundingBoxIoU(boxA: BoundingBox, boxB: BoundingBox): number {
+  const intersectMinX = Math.max(boxA.minX, boxB.minX);
+  const intersectMinY = Math.max(boxA.minY, boxB.minY);
+  const intersectMaxX = Math.min(boxA.maxX, boxB.maxX);
+  const intersectMaxY = Math.min(boxA.maxY, boxB.maxY);
+
+  const intersectW = Math.max(0, intersectMaxX - intersectMinX);
+  const intersectH = Math.max(0, intersectMaxY - intersectMinY);
+  const intersectionArea = intersectW * intersectH;
+
+  const areaA = Math.max(0, boxA.maxX - boxA.minX) * Math.max(0, boxA.maxY - boxA.minY);
+  const areaB = Math.max(0, boxB.maxX - boxB.minX) * Math.max(0, boxB.maxY - boxB.minY);
+  const unionArea = areaA + areaB - intersectionArea;
+
+  if (unionArea <= 0) {
+    return 0;
+  }
+
+  return intersectionArea / unionArea;
 }

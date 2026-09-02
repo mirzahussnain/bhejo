@@ -275,7 +275,7 @@ export function findPhysicalBoundaryLine(
     const coverageRatio = coveredBins / numBins;
     const spanRatio = Math.max(0, maxT - minT) / sideLength;
     const meanOffset = sumS / inliers.length;
-    const offsetBonus = 0.05 * Math.max(-1, Math.min(1, meanOffset / corridorWidth));
+    const offsetBonus = 0.15 * Math.max(-1, Math.min(1, meanOffset / corridorWidth));
     const score = coverageRatio * 0.6 + spanRatio * 0.4 + offsetBonus;
 
     if (score > bestScore) {

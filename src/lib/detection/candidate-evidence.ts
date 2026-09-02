@@ -24,7 +24,7 @@ export interface CandidateEvidenceConfig {
 
 export const DEFAULT_CANDIDATE_EVIDENCE_CONFIG: CandidateEvidenceConfig = {
   samplesPerSide: 18,
-  edgeSearchRadiusPx: 2,
+  edgeSearchRadiusPx: 3,
   minimumSideSupport: 0.12,
   minimumAverageSupport: 0.38,
   strongSideSupport: 0.32,

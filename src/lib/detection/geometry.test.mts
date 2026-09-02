@@ -270,10 +270,10 @@ test("rejects a reconstructed candidate that is too small to be a document", () 
 test("does not promote a large rectangular false positive through reconstruction", () => {
   const screenLikeCandidate = validateQuadrilateral(
     [
-      { x: 30, y: 40 },
-      { x: 610, y: 40 },
-      { x: 610, y: 440 },
-      { x: 30, y: 440 },
+      { x: 10, y: 10 },
+      { x: 630, y: 10 },
+      { x: 630, y: 470 },
+      { x: 10, y: 470 },
     ],
     frameWidth,
     frameHeight,
@@ -1017,4 +1017,554 @@ test("existing passport single-page detection continues to work", () => {
   assert.ok(passportPage.metrics.areaRatio > 0.1);
   assert.ok(passportPage.metrics.angleScore > 0.9);
 });
+
+// --- Regression Tests for Tolerance-Aware Containment (Cases A - H) ---
+
+test("Case A: Card with central chip → outer card wins", () => {
+  const cardCutCorners: DocumentCorners = [
+    { x: 108, y: 106 },
+    { x: 492, y: 106 },
+    { x: 492, y: 344 },
+    { x: 108, y: 344 },
+  ];
+  const chipCorners: DocumentCorners = [
+    { x: 260, y: 170 },
+    { x: 320, y: 170 },
+    { x: 320, y: 220 },
+    { x: 260, y: 220 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardCutCorners, 0.28, 0.65, [0.55, 0.55, 0.50, 0.50]);
+  const innerChip = makeScoredCandidate(chipCorners, 0.01, 0.85, [0.95, 0.95, 0.95, 0.95]);
+
+  const winner = selectBestCandidate([innerChip, outerCard]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardCutCorners);
+});
+
+test("Case B: Card with photo touching rounded top-left corner → outer card wins", () => {
+  // approxPolyDP chamfers the rounded top-left corner to (108, 106)
+  const cardCutCorners: DocumentCorners = [
+    { x: 108, y: 106 },
+    { x: 492, y: 106 },
+    { x: 492, y: 344 },
+    { x: 108, y: 344 },
+  ];
+  // Photo is at the physical top-left of the card: (105, 105) to (220, 230)
+  const photoCorners: DocumentCorners = [
+    { x: 105, y: 105 },
+    { x: 220, y: 105 },
+    { x: 220, y: 230 },
+    { x: 105, y: 230 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardCutCorners, 0.28, 0.62, [0.55, 0.55, 0.50, 0.50]);
+  const innerPhoto = makeScoredCandidate(photoCorners, 0.05, 0.86, [0.92, 0.90, 0.90, 0.88]);
+
+  const winner = selectBestCandidate([innerPhoto, outerCard]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardCutCorners);
+});
+
+test("Case C: Card with barcode near bottom edge → outer card wins", () => {
+  // approxPolyDP chamfers the bottom corners to y=344
+  const cardCutCorners: DocumentCorners = [
+    { x: 108, y: 106 },
+    { x: 492, y: 106 },
+    { x: 492, y: 344 },
+    { x: 108, y: 344 },
+  ];
+  // Barcode sits near bottom edge: y=320..346
+  const barcodeCorners: DocumentCorners = [
+    { x: 120, y: 320 },
+    { x: 480, y: 320 },
+    { x: 480, y: 346 },
+    { x: 120, y: 346 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardCutCorners, 0.28, 0.60, [0.55, 0.55, 0.50, 0.50]);
+  const innerBarcode = makeScoredCandidate(barcodeCorners, 0.03, 0.82, [0.90, 0.88, 0.88, 0.85]);
+
+  const winner = selectBestCandidate([innerBarcode, outerCard]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardCutCorners);
+});
+
+test("Case D: Card with multiple strong internal features (photo + chip + barcode) → outer card wins", () => {
+  const cardCutCorners: DocumentCorners = [
+    { x: 108, y: 106 },
+    { x: 492, y: 106 },
+    { x: 492, y: 344 },
+    { x: 108, y: 344 },
+  ];
+  const photoCorners: DocumentCorners = [
+    { x: 105, y: 105 },
+    { x: 220, y: 105 },
+    { x: 220, y: 230 },
+    { x: 105, y: 230 },
+  ];
+  const chipCorners: DocumentCorners = [
+    { x: 260, y: 170 },
+    { x: 320, y: 170 },
+    { x: 320, y: 220 },
+    { x: 260, y: 220 },
+  ];
+  const barcodeCorners: DocumentCorners = [
+    { x: 120, y: 320 },
+    { x: 480, y: 320 },
+    { x: 480, y: 346 },
+    { x: 120, y: 346 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardCutCorners, 0.28, 0.60, [0.55, 0.55, 0.50, 0.50]);
+  const innerPhoto = makeScoredCandidate(photoCorners, 0.05, 0.86, [0.92, 0.90, 0.90, 0.88]);
+  const innerChip = makeScoredCandidate(chipCorners, 0.01, 0.85, [0.95, 0.95, 0.95, 0.95]);
+  const innerBarcode = makeScoredCandidate(barcodeCorners, 0.03, 0.82, [0.90, 0.88, 0.88, 0.85]);
+
+  const winner = selectBestCandidate([innerPhoto, innerChip, innerBarcode, outerCard]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, cardCutCorners);
+});
+
+test("Case E: Completely separate rectangle beside the card → NOT treated as contained", () => {
+  const cardCorners: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 350, y: 100 },
+    { x: 350, y: 300 },
+    { x: 100, y: 300 },
+  ];
+  const separateRectangle: DocumentCorners = [
+    { x: 380, y: 100 },
+    { x: 550, y: 100 },
+    { x: 550, y: 300 },
+    { x: 380, y: 300 },
+  ];
+
+  assert.equal(isContainedWithin(separateRectangle, cardCorners), false);
+  assert.equal(isContainedWithin(cardCorners, separateRectangle), false);
+});
+
+test("Case F: Two side-by-side document pages → neither page incorrectly contains the other", () => {
+  const leftPage: DocumentCorners = [
+    { x: 60, y: 80 },
+    { x: 300, y: 80 },
+    { x: 300, y: 420 },
+    { x: 60, y: 420 },
+  ];
+  const rightPage: DocumentCorners = [
+    { x: 320, y: 80 },
+    { x: 560, y: 80 },
+    { x: 560, y: 420 },
+    { x: 320, y: 420 },
+  ];
+
+  assert.equal(isContainedWithin(leftPage, rightPage), false);
+  assert.equal(isContainedWithin(rightPage, leftPage), false);
+});
+
+test("Case G: A4/form with internal text boxes → page boundary still wins", () => {
+  const a4Page: DocumentCorners = [
+    { x: 80, y: 40 },
+    { x: 560, y: 40 },
+    { x: 560, y: 440 },
+    { x: 80, y: 440 },
+  ];
+  const textBox: DocumentCorners = [
+    { x: 120, y: 150 },
+    { x: 520, y: 150 },
+    { x: 520, y: 220 },
+    { x: 120, y: 220 },
+  ];
+
+  const outerPage = makeScoredCandidate(a4Page, 0.60, 0.68, [0.70, 0.70, 0.65, 0.65]);
+  const innerTextBox = makeScoredCandidate(textBox, 0.08, 0.85, [0.95, 0.95, 0.90, 0.90]);
+
+  const winner = selectBestCandidate([innerTextBox, outerPage]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, a4Page);
+});
+
+test("Case H: Passport page with internal MRZ/photo/security rectangles → passport page still wins", () => {
+  const passportPageCorners: DocumentCorners = [
+    { x: 330, y: 80 },
+    { x: 530, y: 85 },
+    { x: 525, y: 410 },
+    { x: 325, y: 405 },
+  ];
+  const mrzBlockCorners: DocumentCorners = [
+    { x: 335, y: 340 },
+    { x: 520, y: 340 },
+    { x: 520, y: 395 },
+    { x: 335, y: 395 },
+  ];
+
+  const outerPassport = makeScoredCandidate(passportPageCorners, 0.20, 0.64, [0.60, 0.58, 0.55, 0.52]);
+  const innerMrz = makeScoredCandidate(mrzBlockCorners, 0.03, 0.84, [0.95, 0.92, 0.90, 0.90]);
+
+  const winner = selectBestCandidate([innerMrz, outerPassport]);
+  assert.ok(winner);
+  assert.deepEqual(winner.detection.corners, passportPageCorners);
+});
+
+// --- Specific Targeted Regression Tests 1 to 9 ---
+
+test("1. photo 1–2 px from rounded card corner → outer card wins", () => {
+  // Chamfered card quad (12px chamfer from (100, 100))
+  const cardChamfered: DocumentCorners = [
+    { x: 112, y: 112 },
+    { x: 488, y: 112 },
+    { x: 488, y: 338 },
+    { x: 112, y: 338 },
+  ];
+  // Photo top-left corner is at (102, 102), 2px from physical corner (100, 100)
+  const photo: DocumentCorners = [
+    { x: 102, y: 102 },
+    { x: 210, y: 102 },
+    { x: 210, y: 230 },
+    { x: 102, y: 230 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.62, [0.55, 0.55, 0.50, 0.50]);
+  const innerPhoto = makeScoredCandidate(photo, 0.05, 0.90, [0.95, 0.95, 0.95, 0.95]);
+
+  assert.equal(isContainedWithin(photo, cardChamfered), true);
+  const winner = selectBestCandidate([innerPhoto, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("2. photo touching the chamfered outer polygon → outer card wins", () => {
+  const cardChamfered: DocumentCorners = [
+    { x: 115, y: 112 },
+    { x: 485, y: 112 },
+    { x: 485, y: 338 },
+    { x: 115, y: 338 },
+  ];
+  // Photo top edge touching chamfered top edge at y=112
+  const photo: DocumentCorners = [
+    { x: 115, y: 112 },
+    { x: 220, y: 112 },
+    { x: 220, y: 240 },
+    { x: 115, y: 240 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.60, [0.55, 0.55, 0.50, 0.50]);
+  const innerPhoto = makeScoredCandidate(photo, 0.05, 0.88, [0.92, 0.92, 0.90, 0.90]);
+
+  assert.equal(isContainedWithin(photo, cardChamfered), true);
+  const winner = selectBestCandidate([innerPhoto, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("3. photo partially overlapping the chamfer tolerance → outer card wins", () => {
+  const cardChamfered: DocumentCorners = [
+    { x: 115, y: 112 },
+    { x: 485, y: 112 },
+    { x: 485, y: 338 },
+    { x: 115, y: 338 },
+  ];
+  // Photo top-left at (100, 100), extending 15px past the chamfered edge along normal
+  const photo: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 210, y: 100 },
+    { x: 210, y: 230 },
+    { x: 100, y: 230 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.58, [0.55, 0.50, 0.50, 0.50]);
+  const innerPhoto = makeScoredCandidate(photo, 0.05, 0.92, [0.95, 0.95, 0.95, 0.95]);
+
+  assert.equal(isContainedWithin(photo, cardChamfered), true);
+  const winner = selectBestCandidate([innerPhoto, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("4. barcode 1–2 px from card edge → outer card wins", () => {
+  const cardChamfered: DocumentCorners = [
+    { x: 112, y: 112 },
+    { x: 488, y: 112 },
+    { x: 488, y: 340 },
+    { x: 112, y: 340 },
+  ];
+  // Barcode 2px from bottom physical boundary (y=348 vs physical y=350)
+  const barcode: DocumentCorners = [
+    { x: 120, y: 320 },
+    { x: 480, y: 320 },
+    { x: 480, y: 348 },
+    { x: 120, y: 348 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.60, [0.55, 0.55, 0.50, 0.50]);
+  const innerBarcode = makeScoredCandidate(barcode, 0.03, 0.85, [0.92, 0.90, 0.90, 0.88]);
+
+  assert.equal(isContainedWithin(barcode, cardChamfered), true);
+  const winner = selectBestCandidate([innerBarcode, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("5. chip 1–2 px from card edge → outer card wins", () => {
+  const cardChamfered: DocumentCorners = [
+    { x: 112, y: 112 },
+    { x: 488, y: 112 },
+    { x: 488, y: 340 },
+    { x: 112, y: 340 },
+  ];
+  // Chip positioned 2px from left physical boundary (x=102..160)
+  const chip: DocumentCorners = [
+    { x: 102, y: 180 },
+    { x: 160, y: 180 },
+    { x: 160, y: 230 },
+    { x: 102, y: 230 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.62, [0.55, 0.55, 0.50, 0.50]);
+  const innerChip = makeScoredCandidate(chip, 0.015, 0.88, [0.95, 0.95, 0.95, 0.95]);
+
+  assert.equal(isContainedWithin(chip, cardChamfered), true);
+  const winner = selectBestCandidate([innerChip, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("6. multiple internal rectangles near different edges → outer card wins", () => {
+  const cardChamfered: DocumentCorners = [
+    { x: 115, y: 112 },
+    { x: 485, y: 112 },
+    { x: 485, y: 338 },
+    { x: 115, y: 338 },
+  ];
+  const photo: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 210, y: 100 },
+    { x: 210, y: 230 },
+    { x: 100, y: 230 },
+  ];
+  const chip: DocumentCorners = [
+    { x: 102, y: 240 },
+    { x: 160, y: 240 },
+    { x: 160, y: 290 },
+    { x: 102, y: 290 },
+  ];
+  const barcode: DocumentCorners = [
+    { x: 120, y: 310 },
+    { x: 480, y: 310 },
+    { x: 480, y: 346 },
+    { x: 120, y: 346 },
+  ];
+
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.58, [0.55, 0.50, 0.50, 0.50]);
+  const innerPhoto = makeScoredCandidate(photo, 0.05, 0.92, [0.95, 0.95, 0.95, 0.95]);
+  const innerChip = makeScoredCandidate(chip, 0.015, 0.88, [0.95, 0.95, 0.95, 0.95]);
+  const innerBarcode = makeScoredCandidate(barcode, 0.03, 0.85, [0.92, 0.90, 0.90, 0.88]);
+
+  const winner = selectBestCandidate([innerPhoto, innerChip, innerBarcode, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("7. outer card with weak boundary vs strong internal rectangle → outer card wins", () => {
+  const cardChamfered: DocumentCorners = [
+    { x: 115, y: 112 },
+    { x: 485, y: 112 },
+    { x: 485, y: 338 },
+    { x: 115, y: 338 },
+  ];
+  const innerPhoto: DocumentCorners = [
+    { x: 105, y: 105 },
+    { x: 220, y: 105 },
+    { x: 220, y: 240 },
+    { x: 105, y: 240 },
+  ];
+
+  // Outer card has boundary evidence barely above threshold (average 0.40, weakest 0.15)
+  const outerCard = makeScoredCandidate(cardChamfered, 0.28, 0.52, [0.40, 0.45, 0.42, 0.35]);
+  // Inner photo has near perfect boundary evidence (average 0.98, weakest 0.95)
+  const photoCand = makeScoredCandidate(innerPhoto, 0.06, 0.94, [0.98, 0.98, 0.98, 0.95]);
+
+  const winner = selectBestCandidate([photoCand, outerCard]);
+  assert.deepEqual(winner?.detection.corners, cardChamfered);
+});
+
+test("8. genuinely separate adjacent rectangles → neither is treated as contained", () => {
+  const docA: DocumentCorners = [
+    { x: 50, y: 100 },
+    { x: 280, y: 100 },
+    { x: 280, y: 350 },
+    { x: 50, y: 350 },
+  ];
+  const docB: DocumentCorners = [
+    { x: 300, y: 100 },
+    { x: 550, y: 100 },
+    { x: 550, y: 350 },
+    { x: 300, y: 350 },
+  ];
+
+  assert.equal(isContainedWithin(docA, docB), false);
+  assert.equal(isContainedWithin(docB, docA), false);
+
+  const candA = makeScoredCandidate(docA, 0.25, 0.70, [0.70, 0.70, 0.65, 0.65]);
+  const candB = makeScoredCandidate(docB, 0.25, 0.80, [0.80, 0.80, 0.75, 0.75]);
+
+  const winner = selectBestCandidate([candA, candB]);
+  // candB wins based on higher confidence without suppressing candA as internal feature
+  assert.deepEqual(winner?.detection.corners, docB);
+});
+
+test("9. two side-by-side pages → neither page incorrectly contains the other", () => {
+  const leftPage: DocumentCorners = [
+    { x: 60, y: 60 },
+    { x: 300, y: 60 },
+    { x: 300, y: 420 },
+    { x: 60, y: 420 },
+  ];
+  const rightPage: DocumentCorners = [
+    { x: 310, y: 60 },
+    { x: 550, y: 60 },
+    { x: 550, y: 420 },
+    { x: 310, y: 420 },
+  ];
+
+  assert.equal(isContainedWithin(leftPage, rightPage), false);
+  assert.equal(isContainedWithin(rightPage, leftPage), false);
+
+  const leftCand = makeScoredCandidate(leftPage, 0.35, 0.72, [0.72, 0.70, 0.68, 0.65]);
+  const rightCand = makeScoredCandidate(rightPage, 0.35, 0.76, [0.75, 0.75, 0.72, 0.70]);
+
+  const winner = selectBestCandidate([leftCand, rightCand]);
+  assert.deepEqual(winner?.detection.corners, rightPage);
+});
+
+// --- Scale-Aware Candidate Generation and Temporal Continuity Tests ---
+
+test("document occupying 60% frame is eligible for reconstruction", () => {
+  const corners: DocumentCorners = [
+    { x: 50, y: 40 },
+    { x: 590, y: 40 },
+    { x: 590, y: 380 },
+    { x: 50, y: 380 },
+  ];
+  const validated = validateQuadrilateral(corners, frameWidth, frameHeight, DEFAULT_DOCUMENT_DETECTOR_CONFIG);
+  assert.ok(validated);
+  assert.equal(validated.metrics.areaRatio >= 0.58 && validated.metrics.areaRatio <= 0.62, true);
+
+  const evidence = createBoundaryEvidence([0.70, 0.70, 0.65, 0.65]);
+  const eligible = isReconstructedCandidateEligible(
+    validated,
+    polygonArea(corners) * 0.95,
+    evidence,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+  assert.equal(eligible, true);
+});
+
+test("document occupying 75% frame is eligible for reconstruction", () => {
+  const corners: DocumentCorners = [
+    { x: 30, y: 30 },
+    { x: 610, y: 30 },
+    { x: 610, y: 430 },
+    { x: 30, y: 430 },
+  ];
+  const validated = validateQuadrilateral(corners, frameWidth, frameHeight, DEFAULT_DOCUMENT_DETECTOR_CONFIG);
+  assert.ok(validated);
+  assert.equal(validated.metrics.areaRatio >= 0.74 && validated.metrics.areaRatio <= 0.77, true);
+
+  const evidence = createBoundaryEvidence([0.65, 0.65, 0.60, 0.60]);
+  const eligible = isReconstructedCandidateEligible(
+    validated,
+    polygonArea(corners) * 0.95,
+    evidence,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+  assert.equal(eligible, true);
+});
+
+test("document occupying 85% frame is eligible for reconstruction", () => {
+  const corners: DocumentCorners = [
+    { x: 15, y: 15 },
+    { x: 625, y: 15 },
+    { x: 625, y: 445 },
+    { x: 15, y: 445 },
+  ];
+  const validated = validateQuadrilateral(corners, frameWidth, frameHeight, DEFAULT_DOCUMENT_DETECTOR_CONFIG);
+  assert.ok(validated);
+  assert.equal(validated.metrics.areaRatio >= 0.84 && validated.metrics.areaRatio <= 0.87, true);
+
+  const evidence = createBoundaryEvidence([0.60, 0.60, 0.55, 0.55]);
+  const eligible = isReconstructedCandidateEligible(
+    validated,
+    polygonArea(corners) * 0.95,
+    evidence,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+  assert.equal(eligible, true);
+});
+
+test("close card occupying 75% frame with rounded corners → outer card wins over inner photo", () => {
+  const closeCardChamfered: DocumentCorners = [
+    { x: 45, y: 40 },
+    { x: 595, y: 40 },
+    { x: 595, y: 420 },
+    { x: 45, y: 420 },
+  ];
+  const innerPhoto: DocumentCorners = [
+    { x: 55, y: 55 },
+    { x: 220, y: 55 },
+    { x: 220, y: 260 },
+    { x: 55, y: 260 },
+  ];
+
+  const outerCard = makeScoredCandidate(closeCardChamfered, 0.75, 0.65, [0.65, 0.60, 0.60, 0.55]);
+  const photoCand = makeScoredCandidate(innerPhoto, 0.08, 0.92, [0.95, 0.95, 0.92, 0.90]);
+
+  const winner = selectBestCandidate([photoCand, outerCard]);
+  assert.deepEqual(winner?.detection.corners, closeCardChamfered);
+});
+
+test("candidate continuity across two frames maintains outer card selection", () => {
+  const frame1Card: DocumentCorners = [
+    { x: 100, y: 80 },
+    { x: 540, y: 80 },
+    { x: 540, y: 380 },
+    { x: 100, y: 380 },
+  ];
+  const frame2Card: DocumentCorners = [
+    { x: 102, y: 82 },
+    { x: 542, y: 82 },
+    { x: 542, y: 382 },
+    { x: 102, y: 382 },
+  ];
+  const innerPhoto: DocumentCorners = [
+    { x: 110, y: 90 },
+    { x: 240, y: 90 },
+    { x: 240, y: 240 },
+    { x: 110, y: 240 },
+  ];
+
+  const outerCand = makeScoredCandidate(frame2Card, 0.40, 0.62, [0.55, 0.55, 0.50, 0.50]);
+  const photoCand = makeScoredCandidate(innerPhoto, 0.06, 0.88, [0.92, 0.92, 0.90, 0.90]);
+
+  // With frame1Card as previousCorners, outerCand gets continuity boost and wins
+  const winner = selectBestCandidate([photoCand, outerCand], DEFAULT_DOCUMENT_DETECTOR_CONFIG, frame1Card);
+  assert.deepEqual(winner?.detection.corners, frame2Card);
+});
+
+test("candidate continuity resets when document position changes completely", () => {
+  const oldDocCorners: DocumentCorners = [
+    { x: 20, y: 20 },
+    { x: 200, y: 20 },
+    { x: 200, y: 200 },
+    { x: 20, y: 200 },
+  ];
+  const newDocCorners: DocumentCorners = [
+    { x: 350, y: 250 },
+    { x: 600, y: 250 },
+    { x: 600, y: 450 },
+    { x: 350, y: 450 },
+  ];
+
+  const newCand = makeScoredCandidate(newDocCorners, 0.20, 0.70, [0.70, 0.70, 0.65, 0.65]);
+
+  // Continuity IoU between old and new is 0, so no false continuity locks
+  const winner = selectBestCandidate([newCand], DEFAULT_DOCUMENT_DETECTOR_CONFIG, oldDocCorners);
+  assert.deepEqual(winner?.detection.corners, newDocCorners);
+});
+
+
 

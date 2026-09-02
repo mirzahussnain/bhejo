@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   collectEdgePixelsAlongSide,
+  findPhysicalBoundaryLine,
   intersectLines,
   DEFAULT_CORNER_REFINEMENT_CONFIG,
 } from "./corner-refinement.ts";
@@ -607,5 +608,32 @@ test("10. Synthetic coordinate mapping & perspective crop verification", () => {
   assert.ok(outputDim);
   assert.equal(outputDim.width, 1320); // 1620 - 300
   assert.equal(outputDim.height, 780); // 930 - 150
+});
+
+test("11. Physical boundary outward preference vs dense parallel internal structures", () => {
+  const width = 640;
+  const height = 480;
+  const data = new Uint8Array(width * height);
+
+  // Outer card bottom edge at y=350 with 65% coverage (step 1.5)
+  drawEdgeLine(data, width, height, { x: 115, y: 350 }, { x: 485, y: 350 }, 1.5);
+  // Dense internal horizontal barcode / magnetic stripe at y=344 (6px inside card) with 100% coverage
+  drawEdgeLine(data, width, height, { x: 130, y: 344 }, { x: 470, y: 344 }, 1);
+
+  const edgeMap: EdgeMap = { data, width, height };
+  const centroid: Point = { x: 300, y: 225 };
+
+  // Starting quad bottom side approximation (e.g. from approxPolyDP at y=346)
+  const fitted = findPhysicalBoundaryLine(
+    edgeMap,
+    { x: 108, y: 346 },
+    { x: 492, y: 346 },
+    centroid,
+    DEFAULT_CORNER_REFINEMENT_CONFIG,
+  );
+
+  assert.ok(fitted);
+  // Must lock onto the outer physical boundary at y=350, not the inner parallel line at y=344
+  assert.ok(Math.abs(fitted.y0 - 350) <= 0.5, `Fitted y0 was ${fitted.y0}, expected ~350`);
 });
 

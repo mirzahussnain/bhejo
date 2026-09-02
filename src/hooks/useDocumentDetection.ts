@@ -8,6 +8,7 @@ import {
   type DocumentDetection,
   type DocumentCandidateStrategy,
 } from "@/lib/detection/document-detection";
+import type { DocumentCorners } from "@/lib/detection/geometry";
 import { loadOpenCv } from "@/lib/detection/opencv-loader";
 
 type DocumentDetectorStatus = "idle" | "loading" | "ready" | "error";
@@ -69,10 +70,13 @@ export function useDocumentDetection(
     ...INITIAL_DIAGNOSTICS,
   });
 
+  const lastWinningCornersRef = useRef<DocumentCorners | null>(null);
+
   useEffect(() => {
     activeRef.current = active;
 
     if (!active) {
+      lastWinningCornersRef.current = null;
       diagnosticsRef.current = {
         ...diagnosticsRef.current,
         status: "idle",
@@ -105,6 +109,7 @@ export function useDocumentDetection(
         })
         .catch(() => {
           if (!cancelled && activeRef.current) {
+            lastWinningCornersRef.current = null;
             diagnosticsRef.current = {
               ...diagnosticsRef.current,
               status: "error",
@@ -148,8 +153,14 @@ export function useDocumentDetection(
     const startedAt = performance.now();
 
     try {
-      const result = runDocumentDetection(cv, frame);
+      const result = runDocumentDetection(
+        cv,
+        frame,
+        undefined,
+        lastWinningCornersRef.current,
+      );
       const { detection } = result;
+      lastWinningCornersRef.current = detection?.corners ?? null;
       diagnosticsRef.current = {
         status: "ready",
         documentDetected: detection !== null,
@@ -169,6 +180,7 @@ export function useDocumentDetection(
       };
       onProcessedFrameRef.current?.({ frame, detection });
     } catch {
+      lastWinningCornersRef.current = null;
       diagnosticsRef.current = {
         ...diagnosticsRef.current,
         status: "error",
