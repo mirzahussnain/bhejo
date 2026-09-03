@@ -1,11 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  cancelOwnerSession,
   createOwnerSession,
   finalizeSession,
   getOwnerDocument,
+  getOwnerNotifications,
   getOwnerPageBinary,
+  getOwnerSessionDetail,
+  getOwnerSessionHistory,
   getPublicSessionInfo,
+  markAllNotificationsAsRead,
+  markNotificationAsRead,
   processPageUpload,
   verifySessionOtp,
 } from "./session-service.ts";
@@ -490,3 +496,347 @@ test("Security Audit: Missing storage file is detected during finalization", asy
   assert.strictEqual(finalRes.status, 500);
   assert.match((finalRes.body as { error: string }).error, /Storage file for page 1 is missing/);
 });
+
+test("Phase 3B: Configurable expiry options validation and persistence", async () => {
+  setupTestEnvironment();
+  const now = Date.now();
+
+  // 1. Default expiry is 24h
+  const defaultSession = await createOwnerSession("owner_cfg", "Default Expiry");
+  assert.strictEqual(defaultSession.configuredExpiryHours, 24);
+  const diffDefault = defaultSession.expiresAt - now;
+  assert.ok(diffDefault >= 23 * 3600 * 1000 && diffDefault <= 25 * 3600 * 1000);
+
+  // 2. Explicit 6h expiry
+  const session6h = await createOwnerSession("owner_cfg", "6h Expiry", 6);
+  assert.strictEqual(session6h.configuredExpiryHours, 6);
+  const diff6h = session6h.expiresAt - now;
+  assert.ok(diff6h >= 5.9 * 3600 * 1000 && diff6h <= 6.1 * 3600 * 1000);
+
+  // 3. Explicit 72h expiry
+  const session72h = await createOwnerSession("owner_cfg", "72h Expiry", 72);
+  assert.strictEqual(session72h.configuredExpiryHours, 72);
+  const diff72h = session72h.expiresAt - now;
+  assert.ok(diff72h >= 71.9 * 3600 * 1000 && diff72h <= 72.1 * 3600 * 1000);
+
+  // 4. Invalid expiry falls back to 24h
+  const sessionInvalid = await createOwnerSession("owner_cfg", "Invalid Expiry", 999 as unknown as number);
+  assert.strictEqual(sessionInvalid.configuredExpiryHours, 24);
+});
+
+test("Phase 3B: Single device enforcement - Device A authenticates, Device B is rejected", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_devices", "Passport");
+  const uaDeviceA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile Safari/604.1";
+  const ipDeviceA = "82.165.20.12";
+
+  // Device A enters OTP -> succeeds
+  const authResA = await verifySessionOtp(session.publicToken, session.otp, uaDeviceA, ipDeviceA);
+  assert.strictEqual(authResA.status, 200);
+  assert.strictEqual(authResA.body.success, true);
+  assert.ok(authResA.body.recipientToken);
+
+  // Device B attempts to enter OTP on same session -> rejected with already_authenticated
+  const uaDeviceB = "Mozilla/5.0 (Linux; Android 15; Pixel 8) Chrome/130.0.0.0 Mobile Safari/537.36";
+  const ipDeviceB = "90.120.40.50";
+
+  const authResB = await verifySessionOtp(session.publicToken, session.otp, uaDeviceB, ipDeviceB);
+  assert.strictEqual(authResB.status, 409);
+  assert.strictEqual(authResB.body.success, false);
+  assert.strictEqual(authResB.body.error, "already_authenticated");
+  assert.strictEqual(authResB.body.recipientToken, undefined);
+});
+
+test("Phase 3B: Device metadata is captured and displayed in session detail", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_meta", "Car Title");
+  const ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile Safari/604.1";
+  const ip = "82.165.20.12";
+
+  await verifySessionOtp(session.publicToken, session.otp, ua, ip);
+
+  const detailRes = await getOwnerSessionDetail("owner_meta", session.id);
+  assert.strictEqual(detailRes.status, 200);
+  assert.ok("session" in detailRes.body);
+
+  const device = detailRes.body.connectedDevice;
+  assert.ok(device);
+  assert.strictEqual(device.deviceFamily, "iPhone");
+  assert.strictEqual(device.browser, "Safari");
+  assert.strictEqual(device.os, "iOS 18.1");
+  assert.strictEqual(device.displayName, "iPhone · Safari");
+  assert.strictEqual(device.ipAddress, "82.xxx.xxx.xxx");
+});
+
+test("Phase 3B: Owner session history retrieval and strict owner isolation", async () => {
+  setupTestEnvironment();
+
+  await createOwnerSession("owner_X", "X Doc 1");
+  await createOwnerSession("owner_X", "X Doc 2");
+  await createOwnerSession("owner_Y", "Y Doc 1");
+
+  const histX = await getOwnerSessionHistory("owner_X");
+  assert.strictEqual(histX.status, 200);
+  assert.ok("sessions" in histX.body);
+  assert.strictEqual(histX.body.sessions.length, 2);
+  assert.strictEqual(histX.body.sessions.every((s) => s.title?.startsWith("X Doc")), true);
+
+  const histY = await getOwnerSessionHistory("owner_Y");
+  assert.strictEqual(histY.status, 200);
+  assert.ok("sessions" in histY.body);
+  assert.strictEqual(histY.body.sessions.length, 1);
+  assert.strictEqual(histY.body.sessions[0].title, "Y Doc 1");
+
+  // Owner Y cannot access detail of Owner X's session
+  const xSessionId = histX.body.sessions[0].id;
+  const forbiddenRes = await getOwnerSessionDetail("owner_Y", xSessionId);
+  assert.strictEqual(forbiddenRes.status, 403);
+});
+
+test("Phase 3B: Persistent notifications created upon document completion and marked as read", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_notif", "Utility Bill");
+  const authRes = await verifySessionOtp(
+    session.publicToken,
+    session.otp,
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile Safari/604.1",
+    "82.165.20.12",
+  );
+  const recipientToken = authRes.body.recipientToken!;
+
+  // Upload page 1
+  await processPageUpload({
+    publicToken: session.publicToken,
+    recipientToken,
+    pageId: "page_notif_1",
+    pageNumber: 1,
+    checksum: computeChecksum(SAMPLE_JPEG_BYTES),
+    correctionFallback: false,
+    fileBuffer: SAMPLE_JPEG_BYTES,
+  });
+
+  // Finalize
+  const finalizeRes = await finalizeSession({
+    publicToken: session.publicToken,
+    recipientToken,
+    clientPageIds: ["page_notif_1"],
+  });
+  assert.strictEqual(finalizeRes.status, 200);
+
+  // Check owner notifications
+  const notifRes = await getOwnerNotifications("owner_notif");
+  assert.strictEqual(notifRes.status, 200);
+  assert.ok("notifications" in notifRes.body);
+  assert.strictEqual(notifRes.body.unreadCount, 1);
+  assert.strictEqual(notifRes.body.notifications.length, 1);
+
+  const notif = notifRes.body.notifications[0];
+  assert.strictEqual(notif.title, "Document received");
+  assert.strictEqual(notif.isRead, false);
+  assert.strictEqual(notif.deviceDisplay, "iPhone · Safari");
+
+  // Mark single as read
+  const markRes = await markNotificationAsRead("owner_notif", notif.id);
+  assert.strictEqual(markRes.status, 200);
+
+  const updatedNotifRes = await getOwnerNotifications("owner_notif");
+  assert.ok("unreadCount" in updatedNotifRes.body);
+  assert.strictEqual(updatedNotifRes.body.unreadCount, 0);
+  assert.strictEqual(updatedNotifRes.body.notifications[0].isRead, true);
+
+  // Mark all as read
+  const markAllRes = await markAllNotificationsAsRead("owner_notif");
+  assert.strictEqual(markAllRes.status, 200);
+});
+
+test("Phase 3B: Activity timeline records session lifecycle events in order", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_act", "Contract");
+  const authRes = await verifySessionOtp(session.publicToken, session.otp);
+  const recipientToken = authRes.body.recipientToken!;
+
+  await processPageUpload({
+    publicToken: session.publicToken,
+    recipientToken,
+    pageId: "page_act_1",
+    pageNumber: 1,
+    checksum: computeChecksum(SAMPLE_JPEG_BYTES),
+    correctionFallback: false,
+    fileBuffer: SAMPLE_JPEG_BYTES,
+  });
+
+  await finalizeSession({
+    publicToken: session.publicToken,
+    recipientToken,
+    clientPageIds: ["page_act_1"],
+  });
+
+  const detailRes = await getOwnerSessionDetail("owner_act", session.id);
+  assert.strictEqual(detailRes.status, 200);
+  assert.ok("activities" in detailRes.body);
+
+  const types = detailRes.body.activities.map((a) => a.eventType);
+  assert.ok(types.includes("created"));
+  assert.ok(types.includes("otp_verified"));
+  assert.ok(types.includes("device_connected"));
+  assert.ok(types.includes("page_uploaded"));
+  assert.ok(types.includes("document_completed"));
+});
+
+test("Phase 3B: Start new session workflow creates a brand new session and preserves completed session", async () => {
+  setupTestEnvironment();
+
+  // 1. Session 1 is completed
+  const session1 = await createOwnerSession("owner_multiscan", "Doc A");
+  const auth1 = await verifySessionOtp(session1.publicToken, session1.otp);
+  const token1 = auth1.body.recipientToken!;
+
+  await processPageUpload({
+    publicToken: session1.publicToken,
+    recipientToken: token1,
+    pageId: "p1",
+    pageNumber: 1,
+    checksum: computeChecksum(SAMPLE_JPEG_BYTES),
+    correctionFallback: false,
+    fileBuffer: SAMPLE_JPEG_BYTES,
+  });
+
+  await finalizeSession({
+    publicToken: session1.publicToken,
+    recipientToken: token1,
+    clientPageIds: ["p1"],
+  });
+
+  // 2. "Start new scan" creates a NEW independent session
+  const session2 = await createOwnerSession("owner_multiscan", "Doc B");
+  assert.notStrictEqual(session2.id, session1.id);
+  assert.notStrictEqual(session2.publicToken, session1.publicToken);
+  assert.strictEqual(session2.status, "created");
+
+  // Verify session 1 remains completed
+  const detail1 = await getOwnerSessionDetail("owner_multiscan", session1.id);
+  assert.strictEqual(detail1.status, 200);
+  assert.ok("session" in detail1.body);
+  assert.strictEqual(detail1.body.session.status, "completed");
+
+  // Verify owner history has both
+  const history = await getOwnerSessionHistory("owner_multiscan");
+  assert.ok("sessions" in history.body);
+  assert.strictEqual(history.body.sessions.length, 2);
+});
+
+test("Phase 3B: Owner can cancel active session", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_cancel", "To Be Cancelled");
+  const cancelRes = await cancelOwnerSession("owner_cancel", session.id);
+  assert.strictEqual(cancelRes.status, 200);
+
+  const detail = await getOwnerSessionDetail("owner_cancel", session.id);
+  assert.ok("session" in detail.body);
+  assert.strictEqual(detail.body.session.status, "cancelled");
+
+  // Public endpoint reflects cancellation / non-readiness
+  const pubRes = await getPublicSessionInfo(session.publicToken);
+  assert.ok("status" in pubRes.body);
+  assert.strictEqual(pubRes.body.status, "cancelled");
+});
+
+test("Phase 3B: Cancelled session rejects OTP with explicit cancelled error", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_cancel_otp", "Cancelled Document");
+  await cancelOwnerSession("owner_cancel_otp", session.id);
+
+  // Recipient attempting to submit OTP on cancelled session
+  const authRes = await verifySessionOtp(session.publicToken, session.otp);
+  assert.strictEqual(authRes.status, 410);
+  assert.strictEqual(authRes.body.success, false);
+  assert.strictEqual(authRes.body.error, "cancelled");
+});
+
+test("Phase 3B: Finalization retry idempotency prevents duplicate notifications or activities", async () => {
+  setupTestEnvironment();
+
+  const session = await createOwnerSession("owner_retry_final", "Finalize Retry Test");
+  const authRes = await verifySessionOtp(session.publicToken, session.otp);
+  const recipientToken = authRes.body.recipientToken!;
+
+  await processPageUpload({
+    publicToken: session.publicToken,
+    recipientToken,
+    pageId: "page_rf_1",
+    pageNumber: 1,
+    checksum: computeChecksum(SAMPLE_JPEG_BYTES),
+    correctionFallback: false,
+    fileBuffer: SAMPLE_JPEG_BYTES,
+  });
+
+  // First finalization
+  const res1 = await finalizeSession({
+    publicToken: session.publicToken,
+    recipientToken,
+    clientPageIds: ["page_rf_1"],
+  });
+  assert.strictEqual(res1.status, 200);
+
+  // Second finalization retry
+  const res2 = await finalizeSession({
+    publicToken: session.publicToken,
+    recipientToken,
+    clientPageIds: ["page_rf_1"],
+  });
+  // Must reject as already completed or conflict
+  assert.ok(res2.status === 409 || res2.status === 401);
+
+  // Notifications must contain exactly 1 notification
+  const notifs = await getOwnerNotifications("owner_retry_final");
+  assert.ok("notifications" in notifs.body);
+  assert.strictEqual(notifs.body.notifications.length, 1);
+  assert.strictEqual(notifs.body.unreadCount, 1);
+
+  // Activities must contain exactly 1 document_completed event
+  const detail = await getOwnerSessionDetail("owner_retry_final", session.id);
+  assert.ok("activities" in detail.body);
+  const completedEvents = detail.body.activities.filter((a) => a.eventType === "document_completed");
+  assert.strictEqual(completedEvents.length, 1);
+});
+
+test("Phase 3B: Configured 72h expiry does not extend authenticated 2-hour scan window", async () => {
+  const { repo } = setupTestEnvironment();
+
+  // Create session with 72h link TTL
+  const session = await createOwnerSession("owner_ttl", "Long TTL", 72);
+  const authRes = await verifySessionOtp(session.publicToken, session.otp);
+  const recipientToken = authRes.body.recipientToken!;
+
+  // Verify activeScanExpiresAt is set to ~2 hours from now, NOT 72 hours
+  const stored = await repo.findById(session.id);
+  assert.ok(stored);
+  assert.ok(stored.activeScanExpiresAt);
+  const windowDurationMs = stored.activeScanExpiresAt - stored.createdAt;
+  // ~2 hours (7200000 ms) within 5 seconds tolerance
+  assert.ok(windowDurationMs >= 7190000 && windowDurationMs <= 7210000);
+
+  // Simulate time fast-forward past 2-hour scan window (e.g. +2h 5m), even though 72h has not passed
+  const simulatedExpiredNow = stored.activeScanExpiresAt + 5 * 60 * 1000;
+  // Uploading page with current time past activeScanExpiresAt must be rejected as expired
+  const uploadRes = await processPageUpload({
+    publicToken: session.publicToken,
+    recipientToken,
+    pageId: "page_late",
+    pageNumber: 1,
+    checksum: computeChecksum(SAMPLE_JPEG_BYTES),
+    correctionFallback: false,
+    fileBuffer: SAMPLE_JPEG_BYTES,
+    now: simulatedExpiredNow,
+  });
+  assert.strictEqual(uploadRes.status, 410);
+  assert.strictEqual((uploadRes.body as { error: string }).error, "Session expired");
+});
+
+

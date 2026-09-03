@@ -238,3 +238,106 @@ test("completeSession atomically finalizes and revokes recipient token", async (
   assert.strictEqual(doc.pageCount, 1);
   assert.strictEqual(doc.pages.length, 1);
 });
+
+test("Phase 3B: activity timeline records and maintains chronological order", async () => {
+  const repo = new InMemoryScanSessionRepository();
+  const { session } = await createSampleSession(repo);
+
+  await repo.addActivity({
+    id: "act_1",
+    sessionId: session.id,
+    eventType: "created",
+    description: "Session created",
+    createdAt: 1000,
+  });
+
+  await repo.addActivity({
+    id: "act_2",
+    sessionId: session.id,
+    eventType: "otp_verified",
+    description: "OTP verified",
+    createdAt: 1005,
+  });
+
+  await repo.addActivity({
+    id: "act_3",
+    sessionId: session.id,
+    eventType: "page_uploaded",
+    description: "Page 1 uploaded",
+    metadata: { pageNumber: 1 },
+    createdAt: 1010,
+  });
+
+  const activities = await repo.getActivitiesForSession(session.id);
+  assert.strictEqual(activities.length, 3);
+  assert.strictEqual(activities[0].eventType, "created");
+  assert.strictEqual(activities[1].eventType, "otp_verified");
+  assert.strictEqual(activities[2].eventType, "page_uploaded");
+});
+
+test("Phase 3B: persistent owner notifications and unread/read state transitions", async () => {
+  const repo = new InMemoryScanSessionRepository();
+  const ownerId = "owner_test_123";
+
+  await repo.createNotification({
+    id: "notif_1",
+    ownerId,
+    sessionId: "sess_1",
+    title: "Document received",
+    message: 'Your "Passport" has been submitted.',
+    pageCount: 2,
+    deviceDisplay: "iPhone · Safari",
+    isRead: false,
+    createdAt: 1000,
+    readAt: null,
+  });
+
+  await repo.createNotification({
+    id: "notif_2",
+    ownerId,
+    sessionId: "sess_2",
+    title: "Document received",
+    message: 'Your "Bill" has been submitted.',
+    pageCount: 1,
+    deviceDisplay: "Android · Chrome",
+    isRead: false,
+    createdAt: 2000,
+    readAt: null,
+  });
+
+  const list1 = await repo.getNotificationsForOwner(ownerId);
+  assert.strictEqual(list1.length, 2);
+  assert.strictEqual(list1[0].id, "notif_2"); // descending created_at
+  assert.strictEqual(list1.filter((n) => !n.isRead).length, 2);
+
+  // Mark single read
+  const marked = await repo.markNotificationRead("notif_2", ownerId, 2500);
+  assert.strictEqual(marked, true);
+
+  const list2 = await repo.getNotificationsForOwner(ownerId);
+  assert.strictEqual(list2.find((n) => n.id === "notif_2")?.isRead, true);
+  assert.strictEqual(list2.find((n) => n.id === "notif_1")?.isRead, false);
+
+  // Mark all read
+  await repo.markAllNotificationsRead(ownerId, 3000);
+  const list3 = await repo.getNotificationsForOwner(ownerId);
+  assert.strictEqual(list3.every((n) => n.isRead), true);
+});
+
+test("Phase 3B: cancelSession cancels active session but completed sessions are immutable", async () => {
+  const repo = new InMemoryScanSessionRepository();
+  const { session } = await createSampleSession(repo, { ownerId: "owner_xyz" });
+  const now = Date.now();
+
+  // Cancel created session
+  const cancelled = await repo.cancelSession(session.id, "owner_xyz", now);
+  assert.strictEqual(cancelled, true);
+
+  const cancelledSession = await repo.findById(session.id);
+  assert.strictEqual(cancelledSession?.status, "cancelled");
+
+  // Cannot cancel if wrong owner
+  const { session: session2 } = await createSampleSession(repo, { ownerId: "owner_other" });
+  const wrongOwnerCancel = await repo.cancelSession(session2.id, "owner_xyz", now);
+  assert.strictEqual(wrongOwnerCancel, false);
+});

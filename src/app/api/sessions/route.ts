@@ -8,15 +8,19 @@ export async function POST(request: Request) {
   }
 
   let title: string | undefined;
+  let expiryHours: number | undefined;
   try {
-    const body = (await request.json()) as { title?: string };
+    const body = (await request.json()) as { title?: string; expiryHours?: number };
     if (body && typeof body.title === "string") {
       title = body.title;
+    }
+    if (body && typeof body.expiryHours === "number") {
+      expiryHours = body.expiryHours;
     }
   } catch {
     // Body is optional
   }
 
-  const result = await createOwnerSession(owner.ownerId, title);
+  const result = await createOwnerSession(owner.ownerId, title, expiryHours);
   return Response.json(result, { status: 201 });
 }

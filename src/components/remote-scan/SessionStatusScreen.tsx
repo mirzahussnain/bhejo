@@ -1,5 +1,5 @@
 interface SessionStatusScreenProps {
-  readonly status: "expired" | "locked" | "already_completed" | "not_found";
+  readonly status: "expired" | "locked" | "already_completed" | "cancelled" | "not_found";
 }
 
 export function SessionStatusScreen({ status }: SessionStatusScreenProps) {
@@ -10,7 +10,7 @@ export function SessionStatusScreen({ status }: SessionStatusScreenProps) {
 
   if (status === "expired") {
     title = "This scan link has expired";
-    message = "Scan links expire after 24 hours for privacy and security. Please ask the sender to create a new scan request.";
+    message = "Scan links expire after the configured duration for privacy and security. Please ask the sender to create a new scan request.";
     badgeText = "Link Expired";
     badgeColor = "bg-amber-500/10 text-amber-400 border-amber-500/20";
   } else if (status === "locked") {
@@ -23,6 +23,11 @@ export function SessionStatusScreen({ status }: SessionStatusScreenProps) {
     message = "This document has already been scanned and safely delivered to the sender. No further action is required.";
     badgeText = "Completed";
     badgeColor = "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+  } else if (status === "cancelled") {
+    title = "Scan request cancelled";
+    message = "This scan request was cancelled by the sender. Please contact the sender if you still need to submit documents.";
+    badgeText = "Cancelled";
+    badgeColor = "bg-slate-500/20 text-slate-300 border-slate-600";
   }
 
   return (

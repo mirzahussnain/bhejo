@@ -8,24 +8,30 @@ export const metadata: Metadata = {
 
 export default function DashboardPage() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col justify-center px-5 py-12">
-      <div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm sm:p-10">
-        <div className="border-b border-slate-200 pb-5">
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Bhejo
-          </p>
-          <h1 className="mt-2 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
-            Scan Requests
-          </h1>
-          <p className="mt-2 text-sm text-slate-600">
-            Generate a secure link and code to request documents from someone remotely.
-          </p>
+    <div className="min-h-screen bg-slate-50/60 pb-16">
+      {/* Top Navbar */}
+      <header className="border-b border-slate-200/80 bg-white/80 backdrop-blur-md sticky top-0 z-30">
+        <div className="mx-auto flex max-w-4xl items-center justify-between px-5 py-3.5 sm:px-8">
+          <div className="flex items-center gap-3">
+            <span className="flex size-8 items-center justify-center rounded-xl bg-slate-900 text-xs font-bold text-white shadow-xs">
+              B
+            </span>
+            <div>
+              <span className="text-sm font-bold tracking-tight text-slate-900">Bhejo</span>
+              <span className="hidden sm:inline text-xs text-slate-400 ml-2 border-l border-slate-200 pl-2">
+                Remote Scan Management
+              </span>
+            </div>
+          </div>
         </div>
+      </header>
 
-        <div className="mt-6">
+      {/* Main Content Area */}
+      <main className="mx-auto w-full max-w-4xl px-5 py-8 sm:px-8">
+        <div className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-xs sm:p-8">
           <OwnerSessionManager />
         </div>
-      </div>
-    </main>
+      </main>
+    </div>
   );
 }

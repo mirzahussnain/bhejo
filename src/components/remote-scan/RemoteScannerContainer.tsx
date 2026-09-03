@@ -24,6 +24,7 @@ export type RemoteFlowState =
   | "expired"
   | "locked"
   | "already_completed"
+  | "cancelled"
   | "not_found";
 
 interface RemoteScannerContainerProps {
@@ -80,6 +81,8 @@ export function RemoteScannerContainer({ publicToken }: RemoteScannerContainerPr
           setFlowState("locked");
         } else if (data.status === "completed") {
           setFlowState("already_completed");
+        } else if (data.status === "cancelled") {
+          setFlowState("cancelled");
         } else {
           setFlowState("otp");
         }
@@ -187,6 +190,7 @@ export function RemoteScannerContainer({ publicToken }: RemoteScannerContainerPr
     flowState === "expired" ||
     flowState === "locked" ||
     flowState === "already_completed" ||
+    flowState === "cancelled" ||
     flowState === "not_found"
   ) {
     return <SessionStatusScreen status={flowState} />;

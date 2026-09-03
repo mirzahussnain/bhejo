@@ -1,7 +1,10 @@
 import {
   ACTIVE_SCAN_TTL_MS,
   MAX_OTP_ATTEMPTS,
+  type ConnectedDeviceInfo,
+  type OwnerNotification,
   type ScanSession,
+  type SessionActivityEvent,
   type UploadedDocumentRecord,
   type UploadedPageRecord,
 } from "../../types/remote-scan.ts";
@@ -28,25 +31,41 @@ export interface ScanSessionRepository {
     publicToken: string,
     recipientTokenHash: string,
     now: number,
+    deviceInfo?: ConnectedDeviceInfo,
   ): Promise<ScanSession | null>;
+  updateLastActivity(sessionId: string, now: number): Promise<void>;
+  cancelSession(sessionId: string, ownerId: string, now: number): Promise<boolean>;
   markUploading(sessionId: string, now: number): Promise<boolean>;
   addUploadedPage(page: UploadedPageRecord): Promise<AddPageResult>;
   getPagesForSession(sessionId: string): Promise<readonly UploadedPageRecord[]>;
   completeSession(sessionId: string, pageCount: number, now: number): Promise<boolean>;
   getCompletedDocument(sessionId: string): Promise<UploadedDocumentRecord | null>;
+
+  // Activity Timeline
+  addActivity(activity: SessionActivityEvent): Promise<void>;
+  getActivitiesForSession(sessionId: string): Promise<readonly SessionActivityEvent[]>;
+
+  // Persistent Owner Notifications
+  createNotification(notification: OwnerNotification): Promise<void>;
+  getNotificationsForOwner(ownerId: string): Promise<readonly OwnerNotification[]>;
+  markNotificationRead(notificationId: string, ownerId: string, now: number): Promise<boolean>;
+  markAllNotificationsRead(ownerId: string, now: number): Promise<boolean>;
 }
 
 /**
- * In-Memory repository used strictly as an isolated unit test double.
+ * In-Memory repository used strictly as an isolated unit test double and fallback.
  * Implements authoritative atomic state transitions and concurrency rules.
  */
 export class InMemoryScanSessionRepository implements ScanSessionRepository {
   private readonly sessions = new Map<string, ScanSession>();
   private readonly pages = new Map<string, UploadedPageRecord[]>();
+  private readonly activities = new Map<string, SessionActivityEvent[]>();
+  private readonly notifications = new Map<string, OwnerNotification[]>();
 
   async createSession(session: ScanSession): Promise<ScanSession> {
     this.sessions.set(session.id, { ...session });
     this.pages.set(session.id, []);
+    this.activities.set(session.id, []);
     return session;
   }
 
@@ -71,7 +90,7 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
         results.push({ ...session });
       }
     }
-    return results;
+    return results.sort((a, b) => b.createdAt - a.createdAt);
   }
 
   async recordFailedOtpAttempt(publicToken: string, now: number): Promise<FailedOtpResult> {
@@ -109,11 +128,13 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
   /**
    * Atomic CAS: Only transitions if session is in 'created' state and not expired.
    * Immediately clears otpHash and otpSalt for security.
+   * Records connected device metadata.
    */
   async authenticateSession(
     publicToken: string,
     recipientTokenHash: string,
     now: number,
+    deviceInfo?: ConnectedDeviceInfo,
   ): Promise<ScanSession | null> {
     const session = await this.findByPublicToken(publicToken);
     if (!session) {
@@ -138,10 +159,44 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
       otpHash: null,
       otpSalt: null,
       activeScanExpiresAt,
+      connectedDevice: deviceInfo ?? null,
+      lastActivityAt: now,
       updatedAt: now,
     };
     this.sessions.set(session.id, updated);
     return { ...updated };
+  }
+
+  async updateLastActivity(sessionId: string, now: number): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+
+    const updatedDevice = session.connectedDevice
+      ? { ...session.connectedDevice, lastActivityAt: now }
+      : undefined;
+
+    this.sessions.set(sessionId, {
+      ...session,
+      lastActivityAt: now,
+      connectedDevice: updatedDevice ?? session.connectedDevice,
+      updatedAt: now,
+    });
+  }
+
+  async cancelSession(sessionId: string, ownerId: string, now: number): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.ownerId !== ownerId || session.status === "completed") {
+      return false;
+    }
+
+    this.sessions.set(sessionId, {
+      ...session,
+      status: "cancelled",
+      updatedAt: now,
+    });
+    return true;
   }
 
   async markUploading(sessionId: string, now: number): Promise<boolean> {
@@ -158,13 +213,12 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
       return false;
     }
 
-    if (session.status === "authenticated") {
-      this.sessions.set(sessionId, {
-        ...session,
-        status: "uploading",
-        updatedAt: now,
-      });
-    }
+    this.sessions.set(sessionId, {
+      ...session,
+      status: "uploading",
+      lastActivityAt: now,
+      updatedAt: now,
+    });
     return true;
   }
 
@@ -196,13 +250,17 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
     sessionPages.push({ ...page });
     this.pages.set(page.sessionId, sessionPages);
 
-    if (session.status === "authenticated") {
-      this.sessions.set(session.id, {
-        ...session,
-        status: "uploading",
-        updatedAt: page.createdAt,
-      });
-    }
+    const updatedDevice = session.connectedDevice
+      ? { ...session.connectedDevice, lastActivityAt: page.createdAt }
+      : undefined;
+
+    this.sessions.set(session.id, {
+      ...session,
+      status: "uploading",
+      lastActivityAt: page.createdAt,
+      connectedDevice: updatedDevice ?? session.connectedDevice,
+      updatedAt: page.createdAt,
+    });
 
     return { success: true, isDuplicate: false, conflict: false };
   }
@@ -222,7 +280,7 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
       return false;
     }
 
-    if (session.status !== "uploading") {
+    if (session.status !== "uploading" && session.status !== "authenticated") {
       return false;
     }
 
@@ -230,11 +288,17 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
       return false;
     }
 
+    const updatedDevice = session.connectedDevice
+      ? { ...session.connectedDevice, lastActivityAt: now }
+      : undefined;
+
     this.sessions.set(sessionId, {
       ...session,
       status: "completed",
       recipientTokenHash: null,
       completedAt: now,
+      lastActivityAt: now,
+      connectedDevice: updatedDevice ?? session.connectedDevice,
       updatedAt: now,
     });
     return true;
@@ -256,6 +320,57 @@ export class InMemoryScanSessionRepository implements ScanSessionRepository {
       createdAt: session.createdAt,
       completedAt: session.completedAt ?? session.updatedAt,
     };
+  }
+
+  async addActivity(activity: SessionActivityEvent): Promise<void> {
+    const sessionActivities = this.activities.get(activity.sessionId) ?? [];
+    sessionActivities.push({ ...activity });
+    this.activities.set(activity.sessionId, sessionActivities);
+  }
+
+  async getActivitiesForSession(sessionId: string): Promise<readonly SessionActivityEvent[]> {
+    const sessionActivities = this.activities.get(sessionId) ?? [];
+    return [...sessionActivities].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  async createNotification(notification: OwnerNotification): Promise<void> {
+    const ownerNotifications = this.notifications.get(notification.ownerId) ?? [];
+    ownerNotifications.push({ ...notification });
+    this.notifications.set(notification.ownerId, ownerNotifications);
+  }
+
+  async getNotificationsForOwner(ownerId: string): Promise<readonly OwnerNotification[]> {
+    const ownerNotifications = this.notifications.get(ownerId) ?? [];
+    return [...ownerNotifications].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  async markNotificationRead(notificationId: string, ownerId: string, now: number): Promise<boolean> {
+    const ownerNotifications = this.notifications.get(ownerId) ?? [];
+    const index = ownerNotifications.findIndex((n) => n.id === notificationId);
+    if (index === -1) {
+      return false;
+    }
+    ownerNotifications[index] = {
+      ...ownerNotifications[index],
+      isRead: true,
+      readAt: now,
+    };
+    this.notifications.set(ownerId, ownerNotifications);
+    return true;
+  }
+
+  async markAllNotificationsRead(ownerId: string, now: number): Promise<boolean> {
+    const ownerNotifications = this.notifications.get(ownerId) ?? [];
+    let updated = false;
+    const nextList = ownerNotifications.map((n) => {
+      if (!n.isRead) {
+        updated = true;
+        return { ...n, isRead: true, readAt: now };
+      }
+      return n;
+    });
+    this.notifications.set(ownerId, nextList);
+    return updated;
   }
 }
 
@@ -297,7 +412,10 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
         max_otp_attempts: session.maxOtpAttempts,
         recipient_token_hash: session.recipientTokenHash,
         expires_at: session.expiresAt,
+        configured_expiry_hours: session.configuredExpiryHours ?? 24,
         active_scan_expires_at: session.activeScanExpiresAt,
+        connected_device: session.connectedDevice ? JSON.stringify(session.connectedDevice) : null,
+        last_activity_at: session.lastActivityAt,
         created_at: session.createdAt,
         updated_at: session.updatedAt,
         completed_at: session.completedAt,
@@ -414,6 +532,7 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
     publicToken: string,
     recipientTokenHash: string,
     now: number,
+    deviceInfo?: ConnectedDeviceInfo,
   ): Promise<ScanSession | null> {
     const activeScanExpiresAt = now + ACTIVE_SCAN_TTL_MS;
 
@@ -429,6 +548,8 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
           otp_hash: null,
           otp_salt: null,
           active_scan_expires_at: activeScanExpiresAt,
+          connected_device: deviceInfo ? JSON.stringify(deviceInfo) : null,
+          last_activity_at: now,
           updated_at: now,
         }),
       },
@@ -444,14 +565,28 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
     return this.mapSessionRow(rows[0]);
   }
 
-  async markUploading(sessionId: string, now: number): Promise<boolean> {
-    const res = await fetch(
-      `${this.baseUrl}/rest/v1/scan_sessions?id=eq.${encodeURIComponent(sessionId)}&status=eq.authenticated&expires_at=gt.${now}`,
+  async updateLastActivity(sessionId: string, now: number): Promise<void> {
+    await fetch(
+      `${this.baseUrl}/rest/v1/scan_sessions?id=eq.${encodeURIComponent(sessionId)}`,
       {
         method: "PATCH",
         headers: this.headers(),
         body: JSON.stringify({
-          status: "uploading",
+          last_activity_at: now,
+          updated_at: now,
+        }),
+      },
+    );
+  }
+
+  async cancelSession(sessionId: string, ownerId: string, now: number): Promise<boolean> {
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/scan_sessions?id=eq.${encodeURIComponent(sessionId)}&owner_id=eq.${encodeURIComponent(ownerId)}&status=neq.completed`,
+      {
+        method: "PATCH",
+        headers: this.headers(),
+        body: JSON.stringify({
+          status: "cancelled",
           updated_at: now,
         }),
       },
@@ -460,7 +595,27 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
       return false;
     }
     const rows = (await res.json()) as Array<Record<string, unknown>>;
-    return (rows && rows.length > 0);
+    return Boolean(rows && rows.length > 0);
+  }
+
+  async markUploading(sessionId: string, now: number): Promise<boolean> {
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/scan_sessions?id=eq.${encodeURIComponent(sessionId)}&status=eq.authenticated&expires_at=gt.${now}`,
+      {
+        method: "PATCH",
+        headers: this.headers(),
+        body: JSON.stringify({
+          status: "uploading",
+          last_activity_at: now,
+          updated_at: now,
+        }),
+      },
+    );
+    if (!res.ok) {
+      return false;
+    }
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    return Boolean(rows && rows.length > 0);
   }
 
   async addUploadedPage(page: UploadedPageRecord): Promise<AddPageResult> {
@@ -517,7 +672,7 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
 
   async completeSession(sessionId: string, pageCount: number, now: number): Promise<boolean> {
     const res = await fetch(
-      `${this.baseUrl}/rest/v1/scan_sessions?id=eq.${encodeURIComponent(sessionId)}&status=eq.uploading&expires_at=gt.${now}`,
+      `${this.baseUrl}/rest/v1/scan_sessions?id=eq.${encodeURIComponent(sessionId)}&status=in.(uploading,authenticated)&expires_at=gt.${now}`,
       {
         method: "PATCH",
         headers: this.headers(),
@@ -525,6 +680,7 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
           status: "completed",
           recipient_token_hash: null,
           completed_at: now,
+          last_activity_at: now,
           updated_at: now,
         }),
       },
@@ -533,7 +689,7 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
       return false;
     }
     const rows = (await res.json()) as Array<Record<string, unknown>>;
-    return (rows && rows.length > 0);
+    return Boolean(rows && rows.length > 0);
   }
 
   async getCompletedDocument(sessionId: string): Promise<UploadedDocumentRecord | null> {
@@ -553,7 +709,130 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
     };
   }
 
+  async addActivity(activity: SessionActivityEvent): Promise<void> {
+    await fetch(`${this.baseUrl}/rest/v1/session_activities`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        id: activity.id,
+        session_id: activity.sessionId,
+        event_type: activity.eventType,
+        description: activity.description,
+        metadata: activity.metadata ?? {},
+        created_at: activity.createdAt,
+      }),
+    });
+  }
+
+  async getActivitiesForSession(sessionId: string): Promise<readonly SessionActivityEvent[]> {
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/session_activities?session_id=eq.${encodeURIComponent(sessionId)}&order=created_at.asc`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) {
+      return [];
+    }
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    return (rows || []).map((r) => ({
+      id: String(r.id),
+      sessionId: String(r.session_id),
+      eventType: String(r.event_type) as SessionActivityEvent["eventType"],
+      description: String(r.description),
+      metadata: (r.metadata as Record<string, unknown>) ?? {},
+      createdAt: Number(r.created_at),
+    }));
+  }
+
+  async createNotification(notification: OwnerNotification): Promise<void> {
+    await fetch(`${this.baseUrl}/rest/v1/owner_notifications`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        id: notification.id,
+        owner_id: notification.ownerId,
+        session_id: notification.sessionId,
+        title: notification.title,
+        message: notification.message,
+        page_count: notification.pageCount,
+        device_display: notification.deviceDisplay,
+        is_read: notification.isRead,
+        created_at: notification.createdAt,
+        read_at: notification.readAt,
+      }),
+    });
+  }
+
+  async getNotificationsForOwner(ownerId: string): Promise<readonly OwnerNotification[]> {
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/owner_notifications?owner_id=eq.${encodeURIComponent(ownerId)}&order=created_at.desc`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) {
+      return [];
+    }
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    return (rows || []).map((r) => ({
+      id: String(r.id),
+      ownerId: String(r.owner_id),
+      sessionId: String(r.session_id),
+      title: String(r.title),
+      message: String(r.message),
+      pageCount: Number(r.page_count || 0),
+      deviceDisplay: String(r.device_display || ""),
+      isRead: Boolean(r.is_read),
+      createdAt: Number(r.created_at),
+      readAt: r.read_at ? Number(r.read_at) : null,
+    }));
+  }
+
+  async markNotificationRead(notificationId: string, ownerId: string, now: number): Promise<boolean> {
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/owner_notifications?id=eq.${encodeURIComponent(notificationId)}&owner_id=eq.${encodeURIComponent(ownerId)}`,
+      {
+        method: "PATCH",
+        headers: this.headers(),
+        body: JSON.stringify({
+          is_read: true,
+          read_at: now,
+        }),
+      },
+    );
+    if (!res.ok) {
+      return false;
+    }
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    return Boolean(rows && rows.length > 0);
+  }
+
+  async markAllNotificationsRead(ownerId: string, now: number): Promise<boolean> {
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/owner_notifications?owner_id=eq.${encodeURIComponent(ownerId)}&is_read=eq.false`,
+      {
+        method: "PATCH",
+        headers: this.headers(),
+        body: JSON.stringify({
+          is_read: true,
+          read_at: now,
+        }),
+      },
+    );
+    return res.ok;
+  }
+
   private mapSessionRow(r: Record<string, unknown>): ScanSession {
+    let connectedDevice: ConnectedDeviceInfo | null = null;
+    if (r.connected_device) {
+      if (typeof r.connected_device === "string") {
+        try {
+          connectedDevice = JSON.parse(r.connected_device) as ConnectedDeviceInfo;
+        } catch {
+          connectedDevice = null;
+        }
+      } else {
+        connectedDevice = r.connected_device as ConnectedDeviceInfo;
+      }
+    }
+
     return {
       id: String(r.id),
       ownerId: String(r.owner_id),
@@ -566,7 +845,10 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
       maxOtpAttempts: Number(r.max_otp_attempts || MAX_OTP_ATTEMPTS),
       recipientTokenHash: r.recipient_token_hash ? String(r.recipient_token_hash) : null,
       expiresAt: Number(r.expires_at),
+      configuredExpiryHours: r.configured_expiry_hours ? Number(r.configured_expiry_hours) : undefined,
       activeScanExpiresAt: r.active_scan_expires_at ? Number(r.active_scan_expires_at) : null,
+      connectedDevice,
+      lastActivityAt: r.last_activity_at ? Number(r.last_activity_at) : null,
       createdAt: Number(r.created_at),
       updatedAt: Number(r.updated_at),
       completedAt: r.completed_at ? Number(r.completed_at) : null,

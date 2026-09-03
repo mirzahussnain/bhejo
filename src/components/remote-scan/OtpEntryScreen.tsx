@@ -34,6 +34,12 @@ export function OtpEntryScreen({ title, onVerify }: OtpEntryScreenProps) {
             setErrorMessage("Too many incorrect attempts. Link is locked.");
           } else if (result.error === "expired") {
             setErrorMessage("This scan link has expired.");
+          } else if (result.error === "already_authenticated") {
+            setErrorMessage("This scan session is already in use on another device.");
+          } else if (result.error === "already_completed") {
+            setErrorMessage("This scan request has already been completed.");
+          } else if (result.error === "cancelled") {
+            setErrorMessage("This scan request has been cancelled by the sender.");
           } else {
             const remaining = result.attemptsRemaining ?? null;
             setErrorMessage(

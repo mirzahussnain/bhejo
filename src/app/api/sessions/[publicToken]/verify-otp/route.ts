@@ -18,6 +18,9 @@ export async function POST(request: Request, { params }: RouteParams) {
   }
 
   const otp = typeof body.otp === "string" ? body.otp : "";
-  const result = await verifySessionOtp(publicToken, otp);
+  const userAgent = request.headers.get("user-agent");
+  const clientIp = request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip");
+
+  const result = await verifySessionOtp(publicToken, otp, userAgent, clientIp);
   return Response.json(result.body, { status: result.status });
 }

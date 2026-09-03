@@ -1,16 +1,21 @@
 import {
-  LINK_TTL_MS,
+  ALLOWED_EXPIRY_HOURS,
   MAX_OTP_ATTEMPTS,
   MAX_PAGE_FILE_SIZE_BYTES,
   MAX_PAGES_PER_DOCUMENT,
+  type AllowedExpiryHours,
   type CompleteSessionResult,
+  type ConnectedDeviceInfo,
+  type OwnerNotification,
   type PublicSessionInfo,
   type ScanSession,
+  type SessionActivityEvent,
   type UploadedDocumentRecord,
   type UploadedPageRecord,
   type UploadPageResult,
   type VerifyOtpResult,
 } from "../../types/remote-scan.ts";
+import { parseDeviceMetadata } from "./device-detector.ts";
 import { generateOtp, generateOtpSalt, hashOtp, verifyOtp } from "./otp.ts";
 import { getSessionRepository } from "./session-repository.ts";
 import { getStorageService } from "./storage-service.ts";
@@ -28,19 +33,56 @@ export interface CreateSessionResult {
   readonly publicToken: string;
   readonly otp: string;
   readonly expiresAt: number;
+  readonly configuredExpiryHours: number;
   readonly status: ScanSession["status"];
   readonly title?: string;
+}
+
+export interface OwnerSessionSummary {
+  readonly id: string;
+  readonly publicToken: string;
+  readonly title?: string;
+  readonly status: ScanSession["status"];
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly configuredExpiryHours?: number;
+  readonly connectedDevice?: ConnectedDeviceInfo | null;
+  readonly pageCount: number;
+  readonly lastActivityAt?: number | null;
+  readonly completedAt?: number | null;
+}
+
+export interface OwnerSessionDetail {
+  readonly session: ScanSession;
+  readonly connectedDevice: ConnectedDeviceInfo | null;
+  readonly pageCount: number;
+  readonly pages: readonly UploadedPageRecord[];
+  readonly activities: readonly SessionActivityEvent[];
+  readonly document: UploadedDocumentRecord | null;
+}
+
+export interface OwnerNotificationsResult {
+  readonly notifications: readonly OwnerNotification[];
+  readonly unreadCount: number;
 }
 
 export async function createOwnerSession(
   ownerId: string,
   title?: string,
+  expiryHours?: number,
 ): Promise<CreateSessionResult> {
   const rawOtp = generateOtp();
   const otpSalt = generateOtpSalt();
   const otpHash = await hashOtp(rawOtp, otpSalt);
   const now = Date.now();
-  const expiresAt = now + LINK_TTL_MS;
+
+  // Validate configured expiry hours
+  let selectedExpiryHours: AllowedExpiryHours = 24;
+  if (expiryHours && (ALLOWED_EXPIRY_HOURS as readonly number[]).includes(expiryHours)) {
+    selectedExpiryHours = expiryHours as AllowedExpiryHours;
+  }
+  const ttlMs = selectedExpiryHours * 60 * 60 * 1000;
+  const expiresAt = now + ttlMs;
 
   const session: ScanSession = {
     id: generateSessionId(),
@@ -54,7 +96,10 @@ export async function createOwnerSession(
     maxOtpAttempts: MAX_OTP_ATTEMPTS,
     recipientTokenHash: null,
     expiresAt,
+    configuredExpiryHours: selectedExpiryHours,
     activeScanExpiresAt: null,
+    connectedDevice: null,
+    lastActivityAt: now,
     createdAt: now,
     updatedAt: now,
     completedAt: null,
@@ -63,11 +108,21 @@ export async function createOwnerSession(
   const repo = getSessionRepository();
   await repo.createSession(session);
 
+  // Log session created activity
+  await repo.addActivity({
+    id: `act_${generateSessionId()}`,
+    sessionId: session.id,
+    eventType: "created",
+    description: "Session created",
+    createdAt: now,
+  });
+
   return {
     id: session.id,
     publicToken: session.publicToken,
     otp: rawOtp,
     expiresAt: session.expiresAt,
+    configuredExpiryHours: selectedExpiryHours,
     status: session.status,
     title: session.title,
   };
@@ -96,6 +151,20 @@ export async function getPublicSessionInfo(
     }
   }
 
+  // Record link opened activity once
+  if (status === "created" || status === "authenticated") {
+    const activities = await repo.getActivitiesForSession(session.id);
+    if (!activities.some((a) => a.eventType === "link_opened")) {
+      await repo.addActivity({
+        id: `act_${generateSessionId()}`,
+        sessionId: session.id,
+        eventType: "link_opened",
+        description: "Parent opened scan link",
+        createdAt: now,
+      });
+    }
+  }
+
   return {
     status: 200,
     body: {
@@ -109,6 +178,8 @@ export async function getPublicSessionInfo(
 export async function verifySessionOtp(
   publicToken: string,
   rawOtp: string,
+  userAgent?: string | null,
+  clientIp?: string | null,
 ): Promise<{ status: number; body: VerifyOtpResult }> {
   const otp = rawOtp ? rawOtp.trim() : "";
   if (!/^\d{6}$/.test(otp)) {
@@ -136,6 +207,10 @@ export async function verifySessionOtp(
     return { status: 409, body: { success: false, error: "already_completed" } };
   }
 
+  if (session.status === "cancelled") {
+    return { status: 410, body: { success: false, error: "cancelled" } };
+  }
+
   if (session.status !== "created") {
     return { status: 409, body: { success: false, error: "already_authenticated" } };
   }
@@ -159,6 +234,9 @@ export async function verifySessionOtp(
     };
   }
 
+  // Parse device connection metadata
+  const deviceInfo = parseDeviceMetadata(userAgent, clientIp, now);
+
   // Generate 256-bit opaque recipient token
   const recipientToken = generateRecipientToken();
   const recipientTokenHash = hashToken(recipientToken);
@@ -167,11 +245,34 @@ export async function verifySessionOtp(
     publicToken,
     recipientTokenHash,
     now,
+    deviceInfo,
   );
 
   if (!updatedSession) {
     return { status: 409, body: { success: false, error: "already_authenticated" } };
   }
+
+  // Log activity events
+  await repo.addActivity({
+    id: `act_${generateSessionId()}`,
+    sessionId: session.id,
+    eventType: "otp_verified",
+    description: "OTP verified",
+    createdAt: now,
+  });
+
+  await repo.addActivity({
+    id: `act_${generateSessionId()}`,
+    sessionId: session.id,
+    eventType: "device_connected",
+    description: `${deviceInfo.displayName} connected`,
+    metadata: {
+      device: deviceInfo.displayName,
+      browser: deviceInfo.browser,
+      os: deviceInfo.os,
+    },
+    createdAt: now,
+  });
 
   return {
     status: 200,
@@ -190,6 +291,7 @@ export interface UploadPageParams {
   readonly checksum: string;
   readonly correctionFallback: boolean;
   readonly fileBuffer: Buffer;
+  readonly now?: number;
 }
 
 export async function processPageUpload(
@@ -220,7 +322,7 @@ export async function processPageUpload(
     return { status: 401, body: { success: false, pageId, pageNumber, status: "uploaded", error: "Invalid recipient token" } };
   }
 
-  const now = Date.now();
+  const now = params.now ?? Date.now();
 
   if (now > session.expiresAt || (session.activeScanExpiresAt && now > session.activeScanExpiresAt)) {
     return { status: 410, body: { success: false, pageId, pageNumber, status: "uploaded", error: "Session expired" } };
@@ -301,6 +403,18 @@ export async function processPageUpload(
     };
   }
 
+  // Record activity event on new upload
+  if (!dbResult.isDuplicate) {
+    await repo.addActivity({
+      id: `act_${generateSessionId()}`,
+      sessionId: session.id,
+      eventType: "page_uploaded",
+      description: `Page ${pageNumber} uploaded`,
+      metadata: { pageNumber },
+      createdAt: now,
+    });
+  }
+
   return {
     status: 200,
     body: {
@@ -316,6 +430,7 @@ export interface FinalizeParams {
   readonly publicToken: string;
   readonly recipientToken: string;
   readonly clientPageIds: readonly string[];
+  readonly now?: number;
 }
 
 export async function finalizeSession(
@@ -338,7 +453,7 @@ export async function finalizeSession(
     return { status: 401, body: { error: "Invalid recipient token" } };
   }
 
-  const now = Date.now();
+  const now = params.now ?? Date.now();
 
   if (now > session.expiresAt || (session.activeScanExpiresAt && now > session.activeScanExpiresAt)) {
     return { status: 410, body: { error: "Session expired" } };
@@ -421,6 +536,38 @@ export async function finalizeSession(
     return { status: 409, body: { error: "Failed to finalize session (conflict or expired)" } };
   }
 
+  // Add document completed activity idempotently
+  const existingActivities = await repo.getActivitiesForSession(session.id);
+  if (!existingActivities.some((a) => a.eventType === "document_completed")) {
+    await repo.addActivity({
+      id: `act_${generateSessionId()}`,
+      sessionId: session.id,
+      eventType: "document_completed",
+      description: `Document received (${storedPages.length} ${storedPages.length === 1 ? "page" : "pages"})`,
+      metadata: { pageCount: storedPages.length },
+      createdAt: now,
+    });
+  }
+
+  // Create persistent notification for session owner idempotently
+  const existingNotifs = await repo.getNotificationsForOwner(session.ownerId);
+  if (!existingNotifs.some((n) => n.sessionId === session.id)) {
+    const deviceDisplay = session.connectedDevice?.displayName || "Connected device";
+    const docTitle = session.title ? `"${session.title}"` : "Document";
+    await repo.createNotification({
+      id: `notif_${generateSessionId()}`,
+      ownerId: session.ownerId,
+      sessionId: session.id,
+      title: "Document received",
+      message: `Your ${docTitle} has been submitted.`,
+      pageCount: storedPages.length,
+      deviceDisplay,
+      isRead: false,
+      createdAt: now,
+      readAt: null,
+    });
+  }
+
   return {
     status: 200,
     body: {
@@ -429,6 +576,190 @@ export async function finalizeSession(
       pageCount: storedPages.length,
     },
   };
+}
+
+export async function getOwnerSessionHistory(
+  ownerId: string,
+): Promise<{ status: number; body: { sessions: readonly OwnerSessionSummary[] } | { error: string } }> {
+  if (!ownerId) {
+    return { status: 400, body: { error: "Invalid owner ID" } };
+  }
+
+  const repo = getSessionRepository();
+  const sessions = await repo.findByOwnerId(ownerId);
+  const now = Date.now();
+
+  const summaries: OwnerSessionSummary[] = [];
+
+  for (const s of sessions) {
+    let effectiveStatus = s.status;
+    if (now > s.expiresAt && effectiveStatus !== "completed") {
+      effectiveStatus = "expired";
+    }
+
+    let pageCount = 0;
+    if (effectiveStatus === "completed" || effectiveStatus === "uploading") {
+      const pages = await repo.getPagesForSession(s.id);
+      pageCount = pages.length;
+    }
+
+    summaries.push({
+      id: s.id,
+      publicToken: s.publicToken,
+      title: s.title,
+      status: effectiveStatus,
+      createdAt: s.createdAt,
+      expiresAt: s.expiresAt,
+      configuredExpiryHours: s.configuredExpiryHours,
+      connectedDevice: s.connectedDevice ?? null,
+      pageCount,
+      lastActivityAt: s.lastActivityAt ?? s.updatedAt,
+      completedAt: s.completedAt,
+    });
+  }
+
+  return {
+    status: 200,
+    body: { sessions: summaries },
+  };
+}
+
+export async function getOwnerSessionDetail(
+  ownerId: string,
+  sessionId: string,
+): Promise<{ status: number; body: OwnerSessionDetail | { error: string } }> {
+  if (!ownerId || !sessionId) {
+    return { status: 400, body: { error: "Invalid parameters" } };
+  }
+
+  const repo = getSessionRepository();
+  const session = await repo.findById(sessionId);
+
+  if (!session) {
+    return { status: 404, body: { error: "Session not found" } };
+  }
+
+  if (session.ownerId !== ownerId) {
+    return { status: 403, body: { error: "Forbidden: not session owner" } };
+  }
+
+  const now = Date.now();
+  let effectiveStatus = session.status;
+  if (now > session.expiresAt && effectiveStatus !== "completed") {
+    effectiveStatus = "expired";
+  }
+
+  const pages = await repo.getPagesForSession(sessionId);
+  const activities = await repo.getActivitiesForSession(sessionId);
+  const document = effectiveStatus === "completed" ? await repo.getCompletedDocument(sessionId) : null;
+
+  return {
+    status: 200,
+    body: {
+      session: {
+        ...session,
+        status: effectiveStatus,
+      },
+      connectedDevice: session.connectedDevice ?? null,
+      pageCount: pages.length,
+      pages,
+      activities,
+      document,
+    },
+  };
+}
+
+export async function cancelOwnerSession(
+  ownerId: string,
+  sessionId: string,
+): Promise<{ status: number; body: { success: boolean } | { error: string } }> {
+  if (!ownerId || !sessionId) {
+    return { status: 400, body: { error: "Invalid parameters" } };
+  }
+
+  const repo = getSessionRepository();
+  const session = await repo.findById(sessionId);
+
+  if (!session) {
+    return { status: 404, body: { error: "Session not found" } };
+  }
+
+  if (session.ownerId !== ownerId) {
+    return { status: 403, body: { error: "Forbidden: not session owner" } };
+  }
+
+  if (session.status === "completed") {
+    return { status: 400, body: { error: "Cannot cancel a completed session" } };
+  }
+
+  const now = Date.now();
+  const cancelled = await repo.cancelSession(sessionId, ownerId, now);
+
+  if (!cancelled) {
+    return { status: 409, body: { error: "Failed to cancel session" } };
+  }
+
+  await repo.addActivity({
+    id: `act_${generateSessionId()}`,
+    sessionId,
+    eventType: "session_cancelled",
+    description: "Session cancelled by owner",
+    createdAt: now,
+  });
+
+  return { status: 200, body: { success: true } };
+}
+
+export async function getOwnerNotifications(
+  ownerId: string,
+): Promise<{ status: number; body: OwnerNotificationsResult | { error: string } }> {
+  if (!ownerId) {
+    return { status: 400, body: { error: "Invalid owner ID" } };
+  }
+
+  const repo = getSessionRepository();
+  const notifications = await repo.getNotificationsForOwner(ownerId);
+  const unreadCount = notifications.filter((n) => !n.isRead).length;
+
+  return {
+    status: 200,
+    body: {
+      notifications,
+      unreadCount,
+    },
+  };
+}
+
+export async function markNotificationAsRead(
+  ownerId: string,
+  notificationId: string,
+): Promise<{ status: number; body: { success: boolean } | { error: string } }> {
+  if (!ownerId || !notificationId) {
+    return { status: 400, body: { error: "Invalid parameters" } };
+  }
+
+  const repo = getSessionRepository();
+  const now = Date.now();
+  const success = await repo.markNotificationRead(notificationId, ownerId, now);
+
+  return {
+    status: success ? 200 : 404,
+    body: success ? { success: true } : { error: "Notification not found" },
+  };
+}
+
+export async function markAllNotificationsAsRead(
+  ownerId: string,
+): Promise<{ status: number; body: { success: boolean } }> {
+  if (!ownerId) {
+    return { status: 400, body: { success: false } };
+  }
+
+  const repo = getSessionRepository();
+  const now = Date.now();
+  await repo.markAllNotificationsRead(ownerId, now);
+
+  return { status: 200, body: { success: true } };
 }
 
 export async function getOwnerDocument(
