@@ -93,6 +93,7 @@ export function DocumentEditorView({
   };
 
   const handleDone = async () => {
+    if (isApplying) return;
     setIsApplying(true);
     try {
       const croppedCanvas = await cropperRef.current?.getCroppedCanvas();
@@ -179,8 +180,9 @@ export function DocumentEditorView({
             <button
               type="button"
               onClick={handleRotateCCW}
+              disabled={isApplying}
               title="Rotate 90° counter-clockwise"
-              className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition shadow-2xs active:scale-95"
+              className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition shadow-2xs active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a5 5 0 015 5v2m0 0l-3-3m3 3l3-3M3 10l3 3M3 10l3-3" />
@@ -191,8 +193,9 @@ export function DocumentEditorView({
             <button
               type="button"
               onClick={handleRotateCW}
+              disabled={isApplying}
               title="Rotate 90° clockwise"
-              className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition shadow-2xs active:scale-95"
+              className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition shadow-2xs active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10H11a5 5 0 00-5 5v2m0 0l3-3m-3 3l-3-3M21 10l-3 3m3-3l-3-3" />
@@ -208,7 +211,7 @@ export function DocumentEditorView({
             </span>
             <PresetSelector
               activePreset={currentState.preset}
-              onSelectPreset={handleSelectPreset}
+              onSelectPreset={(p) => !isApplying && handleSelectPreset(p)}
             />
           </div>
 
@@ -217,7 +220,7 @@ export function DocumentEditorView({
             <button
               type="button"
               onClick={handleUndo}
-              disabled={!canUndo}
+              disabled={!canUndo || isApplying}
               title="Undo last edit"
               className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
             >
@@ -230,7 +233,7 @@ export function DocumentEditorView({
             <button
               type="button"
               onClick={handleReset}
-              disabled={!isDirty}
+              disabled={!isDirty || isApplying}
               title="Reset all adjustments back to original scan"
               className="rounded-xl border border-rose-900/60 bg-rose-950/40 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-900/60 hover:text-rose-100 transition shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
             >

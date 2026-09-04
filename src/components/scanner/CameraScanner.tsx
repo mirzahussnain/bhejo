@@ -7,6 +7,7 @@ import { DocumentOverlay } from "@/components/scanner/DocumentOverlay";
 import { MultipageReview } from "@/components/scanner/MultipageReview";
 import { ScannerGuidance } from "@/components/scanner/ScannerGuidance";
 import { ScanPreview } from "@/components/scanner/ScanPreview";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { useCamera } from "@/hooks/useCamera";
 import { useDocumentDetection, type ProcessedDocumentFrame } from "@/hooks/useDocumentDetection";
 import { useDocumentSession } from "@/hooks/useDocumentSession";
@@ -104,7 +105,7 @@ export function CameraScanner({
   const performCapture = useCallback(
     async (source: "automatic" | "manual") => {
       const controller = captureControllerRef.current;
-      if (status !== "ready" || !videoRef.current) {
+      if (status !== "ready" || !videoRef.current || capturePending || isProcessing) {
         return;
       }
       const captureAccepted =
@@ -121,16 +122,33 @@ export function CameraScanner({
       setCapturePending(true);
       setCaptureFailed(false);
 
+      let capturedFrameCanvas: HTMLCanvasElement | null = null;
+
       try {
         const capturedFrame = captureVideoFrame(videoRef.current);
-        const { detection, analysisDimensions, displayCorners } = liveAnalysisRef.current;
+        capturedFrameCanvas = capturedFrame.canvas;
+        const { detection, quality, analysisDimensions, displayCorners } = liveAnalysisRef.current;
         setIsProcessing(true);
         stopCamera();
+
+        // For manual capture: if detection is low-confidence or quality unacceptable (e.g. barcode-only),
+        // gracefully fall back to full-frame uncropped capture rather than an aggressive bad crop.
+        const isReliableDetection =
+          detection !== null &&
+          detection.confidence >= 0.45 &&
+          (quality?.isAcceptable ?? false);
+
+        const targetCorners =
+          source === "automatic"
+            ? (displayCorners ?? detection?.corners ?? null)
+            : isReliableDetection
+              ? (displayCorners ?? detection?.corners ?? null)
+              : null;
 
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         const result = await processCapturedFrame({
           capturedFrame,
-          analysisCorners: displayCorners ?? detection?.corners ?? null,
+          analysisCorners: targetCorners,
           analysisDimensions,
         });
 
@@ -153,13 +171,17 @@ export function CameraScanner({
           setIsProcessingError(true);
         }
       } finally {
+        if (capturedFrameCanvas) {
+          capturedFrameCanvas.width = 0;
+          capturedFrameCanvas.height = 0;
+        }
         if (mountedRef.current && operationId === operationIdRef.current) {
           setCapturePending(false);
           setIsProcessing(false);
         }
       }
     },
-    [clearAutoCaptureTimer, session, status, stopCamera, videoRef],
+    [capturePending, clearAutoCaptureTimer, isProcessing, session, status, stopCamera, videoRef],
   );
 
   const scheduleAutomaticCapture = useCallback(() => {
@@ -523,19 +545,25 @@ export function CameraScanner({
       </header>
 
       {/* Live Camera View with Document Detection Overlay */}
-      <CameraPreview
-        status={status}
-        videoRef={videoRef}
-        onStart={() => void startCamera()}
-        overlay={
-          <DocumentOverlay
-            videoRef={videoRef}
-            corners={displayedAnalysis.displayCorners ?? null}
-            analysisDimensions={displayedAnalysis.analysisDimensions}
-            scannerState={scannerState}
-          />
-        }
-      />
+      <ErrorBoundary
+        fallbackTitle="Camera unavailable"
+        fallbackMessage="We encountered an issue preparing the camera preview. Tap below to retry."
+        onReset={() => void startCamera()}
+      >
+        <CameraPreview
+          status={status}
+          videoRef={videoRef}
+          onStart={() => void startCamera()}
+          overlay={
+            <DocumentOverlay
+              videoRef={videoRef}
+              corners={displayedAnalysis.displayCorners ?? null}
+              analysisDimensions={displayedAnalysis.analysisDimensions}
+              scannerState={scannerState}
+            />
+          }
+        />
+      </ErrorBoundary>
 
       {/* Bottom Manual Capture Button */}
       <footer className="shrink-0 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-4">

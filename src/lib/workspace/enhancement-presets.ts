@@ -278,7 +278,7 @@ export function applyPresetToCanvas(
   canvas: HTMLCanvasElement,
   preset: EnhancementPreset,
 ): void {
-  if (preset === "original") {
+  if (preset === "original" || !canvas || canvas.width <= 0 || canvas.height <= 0) {
     return;
   }
 

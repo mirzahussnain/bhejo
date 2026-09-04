@@ -57,16 +57,18 @@ export function useDocumentSession() {
       if (existingUrl) {
         activeUrlsRef.current.add(existingUrl);
       }
-      const newPage: ScannedPage = {
-        id,
-        pageNumber: documentState.pages.length + 1,
-        imageBlob,
-        previewUrl,
-        correctionFallback,
-        createdAt: Date.now(),
-      };
 
+      let createdPage: ScannedPage | null = null;
       setDocumentState((prev) => {
+        const newPage: ScannedPage = {
+          id,
+          pageNumber: prev.pages.length + 1,
+          imageBlob,
+          previewUrl,
+          correctionFallback,
+          createdAt: Date.now(),
+        };
+        createdPage = newPage;
         const nextPages = appendScannedPage(prev.pages, newPage);
         return {
           ...prev,
@@ -75,7 +77,16 @@ export function useDocumentSession() {
         };
       });
 
-      return newPage;
+      return (
+        createdPage ?? {
+          id,
+          pageNumber: documentState.pages.length + 1,
+          imageBlob,
+          previewUrl,
+          correctionFallback,
+          createdAt: Date.now(),
+        }
+      );
     },
     [createPreviewUrl, documentState.pages.length],
   );
@@ -245,5 +256,6 @@ export function useDocumentSession() {
     resetDocument,
     createPreviewUrl,
     revokePreviewUrl,
+    getActiveUrlCount: () => activeUrlsRef.current.size,
   };
 }

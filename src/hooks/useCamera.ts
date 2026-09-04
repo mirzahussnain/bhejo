@@ -11,17 +11,23 @@ import type { CameraStatus } from "@/types/camera";
 
 export function useCamera() {
   const [status, setStatus] = useState<CameraStatus>("initial");
+  const statusRef = useRef<CameraStatus>(status);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const trackCleanupRef = useRef<(() => void) | null>(null);
   const requestIdRef = useRef(0);
-  const requestPendingRef = useRef(false);
+  const requestPendingState = useRef(false);
   const mountedRef = useRef(true);
   const resumeWhenVisibleRef = useRef(false);
 
   const releaseCamera = useCallback((nextStatus?: CameraStatus) => {
     requestIdRef.current += 1;
-    requestPendingRef.current = false;
+    requestPendingState.current = false;
     trackCleanupRef.current?.();
     trackCleanupRef.current = null;
 
@@ -40,7 +46,7 @@ export function useCamera() {
   }, []);
 
   const startCamera = useCallback(async () => {
-    if (requestPendingRef.current || streamRef.current) {
+    if (requestPendingState.current || streamRef.current) {
       return;
     }
 
@@ -51,7 +57,7 @@ export function useCamera() {
 
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    requestPendingRef.current = true;
+    requestPendingState.current = true;
     setStatus("requesting");
 
     try {
@@ -84,7 +90,15 @@ export function useCamera() {
       };
 
       video.srcObject = stream;
-      await video.play();
+      try {
+        await video.play();
+      } catch (playError) {
+        // AbortError happens during rapid unmount, navigation, or retake when playback is cancelled
+        if (playError instanceof DOMException && playError.name === "AbortError") {
+          return;
+        }
+        throw playError;
+      }
 
       if (mountedRef.current && requestId === requestIdRef.current) {
         setStatus("ready");
@@ -100,7 +114,7 @@ export function useCamera() {
       }
     } finally {
       if (requestId === requestIdRef.current) {
-        requestPendingRef.current = false;
+        requestPendingState.current = false;
       }
     }
   }, [releaseCamera]);
@@ -115,9 +129,15 @@ export function useCamera() {
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        const shouldResume = Boolean(
-          streamRef.current || requestPendingRef.current,
+        const isActiveOrPending = Boolean(
+          streamRef.current || requestPendingState.current,
         );
+        const hasUnrecoverableStatus =
+          statusRef.current === "permission-denied" ||
+          statusRef.current === "no-camera" ||
+          statusRef.current === "unsupported";
+
+        const shouldResume = isActiveOrPending && !hasUnrecoverableStatus;
         resumeWhenVisibleRef.current = shouldResume;
 
         if (shouldResume) {
@@ -126,7 +146,13 @@ export function useCamera() {
         return;
       }
 
-      if (resumeWhenVisibleRef.current) {
+      // Never auto-restart if permission was denied, device missing, or unsupported
+      if (
+        resumeWhenVisibleRef.current &&
+        statusRef.current !== "permission-denied" &&
+        statusRef.current !== "no-camera" &&
+        statusRef.current !== "unsupported"
+      ) {
         resumeWhenVisibleRef.current = false;
         void startCamera();
       }

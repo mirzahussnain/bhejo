@@ -148,6 +148,23 @@ function calculateEdgeConsistency(edgeLengths: readonly number[]): number {
   return (firstPair + secondPair) / 2;
 }
 
+export const MAX_DOCUMENT_ASPECT_RATIO = 4.5;
+
+export function calculateQuadrilateralAspectRatio(
+  edgeLengths: readonly number[],
+): number {
+  if (edgeLengths.length !== 4) {
+    return 1;
+  }
+  const avgWidth = (edgeLengths[0] + edgeLengths[2]) / 2;
+  const avgHeight = (edgeLengths[1] + edgeLengths[3]) / 2;
+  const minDim = Math.min(avgWidth, avgHeight);
+  if (minDim <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(avgWidth, avgHeight) / minDim;
+}
+
 function calculateBoundaryScore(
   corners: DocumentCorners,
   frameWidth: number,
@@ -227,9 +244,12 @@ export function validateQuadrilateral(
 
   const angleScore = calculateAngleScore(angles);
   const edgeConsistency = calculateEdgeConsistency(edgeLengths);
+  const aspectRatio = calculateQuadrilateralAspectRatio(edgeLengths);
+
   if (
     angleScore < config.minAngleScore ||
-    edgeConsistency < config.minEdgeConsistency
+    edgeConsistency < config.minEdgeConsistency ||
+    aspectRatio > MAX_DOCUMENT_ASPECT_RATIO
   ) {
     return null;
   }

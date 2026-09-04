@@ -68,21 +68,31 @@ export function mapAnalysisPointToCapture(
   if (
     !isValidMapping(mapping) ||
     !Number.isFinite(point.x) ||
-    !Number.isFinite(point.y) ||
-    point.x < 0 ||
-    point.y < 0 ||
-    point.x > mapping.analysis.width ||
-    point.y > mapping.analysis.height
+    !Number.isFinite(point.y)
   ) {
     return null;
   }
 
+  // Reject points outside bounds, with micro-epsilon for floating-point math
+  const EPSILON = 1e-4;
+  if (
+    point.x < -EPSILON ||
+    point.y < -EPSILON ||
+    point.x > mapping.analysis.width + EPSILON ||
+    point.y > mapping.analysis.height + EPSILON
+  ) {
+    return null;
+  }
+
+  const safeX = Math.max(0, Math.min(mapping.analysis.width, point.x));
+  const safeY = Math.max(0, Math.min(mapping.analysis.height, point.y));
+
   const sourceX =
     mapping.analysisSourceRect.x +
-    (point.x / mapping.analysis.width) * mapping.analysisSourceRect.width;
+    (safeX / mapping.analysis.width) * mapping.analysisSourceRect.width;
   const sourceY =
     mapping.analysisSourceRect.y +
-    (point.y / mapping.analysis.height) * mapping.analysisSourceRect.height;
+    (safeY / mapping.analysis.height) * mapping.analysisSourceRect.height;
 
   return {
     x: (sourceX / mapping.source.width) * mapping.capture.width,

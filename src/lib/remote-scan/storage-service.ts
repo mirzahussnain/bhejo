@@ -8,7 +8,7 @@ export class InMemoryStorageService implements StorageService {
   private readonly files = new Map<string, Buffer>();
 
   async savePage(sessionId: string, pageId: string, buffer: Buffer): Promise<string> {
-    const storagePath = `sessions/${sessionId}/${pageId}.jpg`;
+    const storagePath = `sessions/${sessionId}/pages/${pageId}.jpg`;
     this.files.set(storagePath, Buffer.from(buffer));
     return storagePath;
   }
@@ -42,7 +42,7 @@ export class SupabaseStorageService implements StorageService {
     serviceRoleKey: string,
     bucketName: string = process.env.STORAGE_BUCKET || "documents",
   ) {
-    this.baseUrl = supabaseUrl.replace(/\/$/, "");
+    this.baseUrl = supabaseUrl.trim().replace(/\/rest\/v1\/?$/i, "").replace(/\/+$/, "");
     this.serviceRoleKey = serviceRoleKey;
     this.bucketName = bucketName;
   }
@@ -59,7 +59,7 @@ export class SupabaseStorageService implements StorageService {
   }
 
   async savePage(sessionId: string, pageId: string, buffer: Buffer): Promise<string> {
-    const storagePath = `sessions/${sessionId}/${pageId}.jpg`;
+    const storagePath = `sessions/${sessionId}/pages/${pageId}.jpg`;
     const url = `${this.baseUrl}/storage/v1/object/${this.bucketName}/${storagePath}`;
 
     const res = await fetch(url, {
@@ -125,11 +125,14 @@ export function getStorageService(): StorageService {
     return storageServiceInstance;
   }
 
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "")
+    .trim()
+    .replace(/\/rest\/v1\/?$/i, "")
+    .replace(/\/+$/, "");
+  const secretKey = process.env.SUPABASE_SECRET_KEY;
 
-  if (supabaseUrl && serviceRoleKey) {
-    storageServiceInstance = new SupabaseStorageService(supabaseUrl, serviceRoleKey);
+  if (supabaseUrl && secretKey) {
+    storageServiceInstance = new SupabaseStorageService(supabaseUrl, secretKey);
   } else {
     storageServiceInstance = new InMemoryStorageService();
   }

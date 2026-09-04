@@ -565,7 +565,9 @@ export function refineSubPixel(
       ) {
         refined.push(corners[index]);
       } else {
-        refined.push({ x: rx, y: ry });
+        const clampedX = Math.max(0, Math.min(grayscale.cols, rx));
+        const clampedY = Math.max(0, Math.min(grayscale.rows, ry));
+        refined.push({ x: clampedX, y: clampedY });
       }
     }
 

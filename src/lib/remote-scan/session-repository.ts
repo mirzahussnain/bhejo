@@ -383,7 +383,7 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
   private readonly serviceRoleKey: string;
 
   constructor(supabaseUrl: string, serviceRoleKey: string) {
-    this.baseUrl = supabaseUrl.replace(/\/$/, "");
+    this.baseUrl = supabaseUrl.trim().replace(/\/rest\/v1\/?$/i, "").replace(/\/+$/, "");
     this.serviceRoleKey = serviceRoleKey;
   }
 
@@ -880,11 +880,14 @@ export function getSessionRepository(): ScanSessionRepository {
     return repositoryInstance;
   }
 
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "")
+    .trim()
+    .replace(/\/rest\/v1\/?$/i, "")
+    .replace(/\/+$/, "");
+  const secretKey = process.env.SUPABASE_SECRET_KEY;
 
-  if (supabaseUrl && serviceRoleKey) {
-    repositoryInstance = new SupabaseScanSessionRepository(supabaseUrl, serviceRoleKey);
+  if (supabaseUrl && secretKey) {
+    repositoryInstance = new SupabaseScanSessionRepository(supabaseUrl, secretKey);
   } else {
     repositoryInstance = new InMemoryScanSessionRepository();
   }

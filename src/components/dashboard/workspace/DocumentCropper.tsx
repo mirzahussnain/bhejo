@@ -146,8 +146,16 @@ export const DocumentCropper = forwardRef<DocumentCropperRef, DocumentCropperPro
                 const scaleY = naturalHeight / Math.max(1, imgRect.height);
                 const scale = Math.max(scaleX, scaleY);
 
-                const targetWidth = Math.max(1, Math.round(sel.width * scale));
-                const targetHeight = Math.max(1, Math.round(sel.height * scale));
+                const MAX_CROPPER_DIMENSION = 2560;
+                let targetWidth = Math.max(1, Math.round(sel.width * scale));
+                let targetHeight = Math.max(1, Math.round(sel.height * scale));
+
+                const maxEdge = Math.max(targetWidth, targetHeight);
+                if (maxEdge > MAX_CROPPER_DIMENSION) {
+                  const downscale = MAX_CROPPER_DIMENSION / maxEdge;
+                  targetWidth = Math.max(1, Math.round(targetWidth * downscale));
+                  targetHeight = Math.max(1, Math.round(targetHeight * downscale));
+                }
 
                 return await sel.$toCanvas({
                   width: targetWidth,
@@ -196,12 +204,14 @@ export const DocumentCropper = forwardRef<DocumentCropperRef, DocumentCropperPro
       if (!imageRef.current) return;
 
       const imgEl = imageRef.current;
+      const containerEl = containerRef.current;
       let instance: Cropper | null = null;
+      let selectionChangeHandler: (() => void) | null = null;
 
       try {
         instance = new Cropper(imgEl, {
           template: DOCUMENT_CROPPER_TEMPLATE,
-          container: containerRef.current || undefined,
+          container: containerEl || undefined,
         });
         cropperRef.current = instance;
 
@@ -229,10 +239,10 @@ export const DocumentCropper = forwardRef<DocumentCropperRef, DocumentCropperPro
 
               const sel = instance?.getCropperSelection();
               if (sel) {
-                // Listen for change events to inform parent of crop activity
-                sel.addEventListener("change", () => {
+                selectionChangeHandler = () => {
                   onTransformChange?.(0, hasCropChangedInternal());
-                });
+                };
+                sel.addEventListener("change", selectionChangeHandler);
               }
 
               onReady?.();
@@ -247,9 +257,21 @@ export const DocumentCropper = forwardRef<DocumentCropperRef, DocumentCropperPro
         isCancelled = true;
         if (instance) {
           try {
+            const sel = instance.getCropperSelection();
+            if (sel && selectionChangeHandler) {
+              sel.removeEventListener("change", selectionChangeHandler);
+            }
             instance.destroy();
           } catch {
             // Ignore teardown error
+          }
+        }
+        if (containerEl) {
+          try {
+            const canvases = containerEl.querySelectorAll("cropper-canvas");
+            canvases.forEach((el) => el.remove());
+          } catch {
+            // Ignore
           }
         }
         cropperRef.current = null;

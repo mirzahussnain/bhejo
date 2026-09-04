@@ -35,7 +35,7 @@ export function WorkspaceToolbar({
           type="button"
           onClick={onClose}
           className="flex size-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition sm:hidden"
-          aria-label="Close"
+          aria-label="Close workspace"
         >
           ✕
         </button>
@@ -63,6 +63,7 @@ export function WorkspaceToolbar({
         <button
           type="button"
           onClick={() => onChangeMode("preview")}
+          aria-pressed={mode === "preview"}
           className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
             mode === "preview"
               ? "bg-white text-slate-900 shadow-xs"
@@ -79,6 +80,7 @@ export function WorkspaceToolbar({
         <button
           type="button"
           onClick={() => onChangeMode("edit")}
+          aria-pressed={mode === "edit"}
           className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
             mode === "edit"
               ? "bg-white text-slate-900 shadow-xs"
@@ -121,7 +123,7 @@ export function WorkspaceToolbar({
           type="button"
           onClick={onClose}
           className="hidden sm:flex size-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition ml-1"
-          aria-label="Close"
+          aria-label="Close workspace"
         >
           ✕
         </button>

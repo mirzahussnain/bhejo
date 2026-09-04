@@ -14,6 +14,7 @@ import { DEFAULT_EXPORT_JPEG_QUALITY } from "@/lib/workspace/constants";
 import { WorkspaceToolbar } from "./WorkspaceToolbar";
 import { ThumbnailBar } from "./ThumbnailBar";
 import { DocumentPreviewView } from "./DocumentPreviewView";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 
 // Lazy-load the heavy editor view so the main dashboard never pays the bundle cost upfront
 const LazyDocumentEditorView = dynamic(
@@ -74,6 +75,18 @@ export function DocumentWorkspaceModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  // Clean up edited canvases memory on modal unmount
+  useEffect(() => {
+    return () => {
+      Object.values(editedCanvases).forEach((canvas) => {
+        if (canvas) {
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      });
+    };
+  }, [editedCanvases]);
+
   // Handle downloading the pristine original scan directly
   const handleDownloadOriginal = () => {
     if (!activePage) return;
@@ -87,7 +100,7 @@ export function DocumentWorkspaceModal({
 
   // Handle exporting and downloading the edited scan
   const handleDownloadEdited = async () => {
-    if (!activePage) return;
+    if (!activePage || isExporting) return;
 
     // If no edits have been made, fallback to downloading original
     if (!hasEdits || !activeEditedCanvas) {
@@ -96,29 +109,34 @@ export function DocumentWorkspaceModal({
     }
 
     setIsExporting(true);
-    let blobUrl: string | null = null;
     try {
       activeEditedCanvas.toBlob(
         (blob) => {
-          if (!blob) {
-            setIsExporting(false);
-            return;
-          }
-          blobUrl = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = blobUrl;
-          link.download = `scan-${sessionId.slice(0, 8)}-page-${activePage.pageNumber}-edited.jpg`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-
-          // Revoke immediately after download initiation
-          setTimeout(() => {
+          let blobUrl: string | null = null;
+          try {
+            if (!blob) {
+              return;
+            }
+            blobUrl = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = blobUrl;
+            link.download = `scan-${sessionId.slice(0, 8)}-page-${activePage.pageNumber}-edited.jpg`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          } finally {
             if (blobUrl) {
-              URL.revokeObjectURL(blobUrl);
+              const urlToRevoke = blobUrl;
+              setTimeout(() => {
+                try {
+                  URL.revokeObjectURL(urlToRevoke);
+                } catch {
+                  // Ignore
+                }
+              }, 200);
             }
             setIsExporting(false);
-          }, 100);
+          }
         },
         "image/jpeg",
         DEFAULT_EXPORT_JPEG_QUALITY,
@@ -149,7 +167,12 @@ export function DocumentWorkspaceModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-0 sm:p-4 backdrop-blur-xs animate-in fade-in duration-150">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={sessionTitle || "Document Workspace"}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-0 sm:p-4 backdrop-blur-xs animate-in fade-in duration-150"
+    >
       <div className="flex h-full w-full flex-col overflow-hidden sm:rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl">
         {/* Workspace Toolbar */}
         <WorkspaceToolbar
@@ -167,29 +190,35 @@ export function DocumentWorkspaceModal({
 
         {/* Viewport: Preview View or Editor View */}
         <div className="relative flex flex-1 overflow-hidden">
-          {mode === "preview" ? (
-            <DocumentPreviewView
-              page={activePage}
-              pageIndex={activePageIndex}
-              totalPages={workspacePages.length}
-              editState={activeEditState}
-              editedCanvas={activeEditedCanvas}
-              onPrevPage={() => setActivePageIndex((prev) => Math.max(0, prev - 1))}
-              onNextPage={() =>
-                setActivePageIndex((prev) =>
-                  Math.min(workspacePages.length - 1, prev + 1),
-                )
-              }
-              onEnterEditMode={() => setMode("edit")}
-            />
-          ) : (
-            <LazyDocumentEditorView
-              page={activePage}
-              initialEditState={activeEditState}
-              onApplyEdits={handleApplyEdits}
-              onBackToPreview={() => setMode("preview")}
-            />
-          )}
+          <ErrorBoundary
+            fallbackTitle="Document preview error"
+            fallbackMessage="An unexpected issue occurred while displaying this page. Tap below to reload the preview."
+            onReset={() => setMode("preview")}
+          >
+            {mode === "preview" ? (
+              <DocumentPreviewView
+                page={activePage}
+                pageIndex={activePageIndex}
+                totalPages={workspacePages.length}
+                editState={activeEditState}
+                editedCanvas={activeEditedCanvas}
+                onPrevPage={() => setActivePageIndex((prev) => Math.max(0, prev - 1))}
+                onNextPage={() =>
+                  setActivePageIndex((prev) =>
+                    Math.min(workspacePages.length - 1, prev + 1),
+                  )
+                }
+                onEnterEditMode={() => setMode("edit")}
+              />
+            ) : (
+              <LazyDocumentEditorView
+                page={activePage}
+                initialEditState={activeEditState}
+                onApplyEdits={handleApplyEdits}
+                onBackToPreview={() => setMode("preview")}
+              />
+            )}
+          </ErrorBoundary>
         </div>
 
         {/* Multipage Thumbnail Strip - only visible in Preview mode */}

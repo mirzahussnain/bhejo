@@ -81,6 +81,34 @@ export function getCameraErrorStatus(error: unknown): CameraStatus {
   return "error";
 }
 
+export const MAX_CAPTURE_CANVAS_DIMENSION = 2560;
+
+export function calculateSafeCaptureDimensions(
+  videoWidth: number,
+  videoHeight: number,
+  maxDimension: number = MAX_CAPTURE_CANVAS_DIMENSION,
+): { readonly width: number; readonly height: number } {
+  const maxEdge = Math.max(videoWidth, videoHeight);
+  if (maxEdge <= maxDimension) {
+    return { width: videoWidth, height: videoHeight };
+  }
+  const scale = maxDimension / maxEdge;
+  return {
+    width: Math.max(1, Math.round(videoWidth * scale)),
+    height: Math.max(1, Math.round(videoHeight * scale)),
+  };
+}
+
+export function releaseCanvasMemory(
+  canvas: HTMLCanvasElement | null | undefined,
+): void {
+  if (!canvas) {
+    return;
+  }
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
 export interface CapturedVideoFrame {
   readonly canvas: HTMLCanvasElement;
   readonly sourceDimensions: { readonly width: number; readonly height: number };
@@ -93,19 +121,24 @@ export function captureVideoFrame(
     throw new Error("The camera frame is not ready.");
   }
 
+  const { width, height } = calculateSafeCaptureDimensions(
+    video.videoWidth,
+    video.videoHeight,
+  );
+
   const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  canvas.width = width;
+  canvas.height = height;
 
   const context = canvas.getContext("2d");
   if (!context) {
     throw new Error("Canvas is not available.");
   }
 
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  context.drawImage(video, 0, 0, width, height);
 
   return {
     canvas,
-    sourceDimensions: { width: video.videoWidth, height: video.videoHeight },
+    sourceDimensions: { width, height },
   };
 }

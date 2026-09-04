@@ -83,6 +83,7 @@ export function DocumentPreviewView({
           type="button"
           onClick={() => setIsZoomed(!isZoomed)}
           title={isZoomed ? "Fit to screen" : "Zoom in to inspect text"}
+          aria-label={isZoomed ? "Fit to screen" : "Zoom in to inspect text"}
           className="flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-800/90 px-3 py-1 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition shadow-md backdrop-blur-xs"
         >
           <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

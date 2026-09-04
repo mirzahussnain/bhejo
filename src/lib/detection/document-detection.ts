@@ -309,7 +309,10 @@ export function selectBestCandidate(
   candidates: readonly ScoredDocumentCandidate[],
   config: Pick<
     DocumentDetectorConfig,
-    "minContainmentAreaRatio" | "standardEvidence" | "containmentTolerancePx"
+    | "minContainmentAreaRatio"
+    | "standardEvidence"
+    | "reconstructionEvidence"
+    | "containmentTolerancePx"
   > = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
   previousCorners?: DocumentCorners | null,
 ): ScoredDocumentCandidate | null {
@@ -326,10 +329,15 @@ export function selectBestCandidate(
 
   for (const candidateA of candidates) {
     // An enclosing candidate must have balanced boundary evidence.
+    const evidenceConfig =
+      candidateA.strategy === "weak-edge-reconstruction"
+        ? config.reconstructionEvidence
+        : config.standardEvidence;
+
     if (
       !hasBalancedBoundaryEvidence(
         candidateA.boundaryEvidence,
-        config.standardEvidence,
+        evidenceConfig,
       )
     ) {
       continue;

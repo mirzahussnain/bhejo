@@ -28,12 +28,37 @@ function isFinitePoint(point: Point): boolean {
   return Number.isFinite(point.x) && Number.isFinite(point.y);
 }
 
+export function clampCornersToSourceDimensions(
+  corners: DocumentCorners,
+  source: PerspectiveOutputDimensions,
+): DocumentCorners {
+  return [
+    {
+      x: Math.max(0, Math.min(source.width, corners[0].x)),
+      y: Math.max(0, Math.min(source.height, corners[0].y)),
+    },
+    {
+      x: Math.max(0, Math.min(source.width, corners[1].x)),
+      y: Math.max(0, Math.min(source.height, corners[1].y)),
+    },
+    {
+      x: Math.max(0, Math.min(source.width, corners[2].x)),
+      y: Math.max(0, Math.min(source.height, corners[2].y)),
+    },
+    {
+      x: Math.max(0, Math.min(source.width, corners[3].x)),
+      y: Math.max(0, Math.min(source.height, corners[3].y)),
+    },
+  ];
+}
+
 export function isValidPerspectiveQuadrilateral(
   corners: DocumentCorners,
   source: PerspectiveOutputDimensions,
   config: Pick<PerspectiveTransformConfig, "minimumAreaRatio"> =
     DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
 ): boolean {
+  const EPSILON = 1e-4;
   if (
     !Number.isFinite(source.width) ||
     !Number.isFinite(source.height) ||
@@ -42,23 +67,27 @@ export function isValidPerspectiveQuadrilateral(
     corners.some(
       (corner) =>
         !isFinitePoint(corner) ||
-        corner.x < 0 ||
-        corner.y < 0 ||
-        corner.x > source.width ||
-        corner.y > source.height,
+        corner.x < -EPSILON ||
+        corner.y < -EPSILON ||
+        corner.x > source.width + EPSILON ||
+        corner.y > source.height + EPSILON,
     )
   ) {
     return false;
   }
 
+  const clamped = clampCornersToSourceDimensions(corners, source);
   const uniqueCornerCount = new Set(
-    corners.map((corner) => `${corner.x}:${corner.y}`),
+    clamped.map((corner) => `${corner.x}:${corner.y}`),
   ).size;
-  if (uniqueCornerCount !== 4 || !isConvexQuadrilateral(corners)) {
+  if (uniqueCornerCount !== 4 || !isConvexQuadrilateral(clamped)) {
     return false;
   }
 
-  return polygonArea(corners) / (source.width * source.height) >= config.minimumAreaRatio;
+  return (
+    polygonArea(clamped) / (source.width * source.height) >=
+    config.minimumAreaRatio
+  );
 }
 
 export function calculatePerspectiveOutputDimensions(
@@ -122,7 +151,8 @@ export function warpPerspectiveToCanvas(
     throw new Error("The document edges are not usable for correction.");
   }
 
-  const output = calculatePerspectiveOutputDimensions(corners, config);
+  const safeCorners = clampCornersToSourceDimensions(corners, sourceDimensions);
+  const output = calculatePerspectiveOutputDimensions(safeCorners, config);
   if (!output) {
     throw new Error("The document size is not usable for correction.");
   }
@@ -132,7 +162,7 @@ export function warpPerspectiveToCanvas(
     4,
     1,
     cv.CV_32FC2,
-    corners.flatMap((corner) => [corner.x, corner.y]),
+    safeCorners.flatMap((corner) => [corner.x, corner.y]),
   );
   const transformDestination = cv.matFromArray(4, 1, cv.CV_32FC2, [
     0,
