@@ -3,6 +3,7 @@ import type { OwnerSessionDetail } from "@/lib/remote-scan/session-service";
 import { ActivityTimeline } from "./ui/ActivityTimeline";
 import { DeviceCard } from "./ui/DeviceCard";
 import { StatusBadge } from "./ui/StatusBadge";
+import { DocumentWorkspaceModal } from "./workspace/DocumentWorkspaceModal";
 
 interface SessionDetailModalProps {
   readonly sessionId: string;
@@ -34,6 +35,7 @@ export function SessionDetailModal({
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedOtp, setCopiedOtp] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [workspacePageIndex, setWorkspacePageIndex] = useState<number | null>(null);
   const isPollingRef = useRef(false);
 
   useEffect(() => {
@@ -267,7 +269,7 @@ export function SessionDetailModal({
               {/* 4. COMPLETED DOCUMENT PREVIEW (When completed) */}
               {detail.session.status === "completed" && detail.pages.length > 0 && (
                 <div className="rounded-2xl border border-emerald-200 bg-emerald-50/40 p-4 sm:p-5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-800">
                         Document Received
@@ -276,21 +278,39 @@ export function SessionDetailModal({
                         {detail.pages.length} {detail.pages.length === 1 ? "Page" : "Pages"}
                       </h3>
                     </div>
-                    <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
-                      Immutable
-                    </span>
+
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
+                        Immutable
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setWorkspacePageIndex(0)}
+                        className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 transition shadow-xs"
+                      >
+                        <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        <span>Preview Document</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* Thumbnail Grid */}
                   <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-                    {detail.pages.map((p) => {
+                    {detail.pages.map((p, idx) => {
                       const downloadUrl = `/api/owner/sessions/${sessionId}/document/page/${p.id}`;
                       return (
                         <div
                           key={p.id}
-                          className="group relative flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xs"
+                          className="group relative flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xs hover:border-slate-300 transition"
                         >
-                          <div className="aspect-[3/4] w-full bg-slate-100 overflow-hidden">
+                          <div
+                            onClick={() => setWorkspacePageIndex(idx)}
+                            className="aspect-[3/4] w-full bg-slate-100 overflow-hidden cursor-pointer"
+                            title="Click to preview & edit this page"
+                          >
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
                               src={downloadUrl}
@@ -303,13 +323,22 @@ export function SessionDetailModal({
                             <span className="font-semibold text-slate-700">
                               Page {p.pageNumber}
                             </span>
-                            <a
-                              href={downloadUrl}
-                              download={`document-page-${p.pageNumber}.jpg`}
-                              className="text-[11px] font-medium text-slate-600 hover:text-slate-900 underline"
-                            >
-                              Download
-                            </a>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setWorkspacePageIndex(idx)}
+                                className="text-[11px] font-semibold text-slate-900 hover:text-slate-700 underline"
+                              >
+                                Preview
+                              </button>
+                              <a
+                                href={downloadUrl}
+                                download={`document-page-${p.pageNumber}.jpg`}
+                                className="text-[11px] font-medium text-slate-500 hover:text-slate-900 underline"
+                              >
+                                Download
+                              </a>
+                            </div>
                           </div>
                         </div>
                       );
@@ -361,6 +390,17 @@ export function SessionDetailModal({
           </div>
         </div>
       </div>
+
+      {/* Document Workspace Modal */}
+      {workspacePageIndex !== null && detail && (
+        <DocumentWorkspaceModal
+          sessionId={sessionId}
+          sessionTitle={detail.session.title}
+          pages={detail.pages}
+          initialPageIndex={workspacePageIndex}
+          onClose={() => setWorkspacePageIndex(null)}
+        />
+      )}
     </div>
   );
 }
