@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { motion, useReducedMotion } from "motion/react";
+import { motion, useReducedMotion, type TargetAndTransition } from "motion/react";
 import { cn } from "@/lib/utils";
 
 export interface RadialGradientBackgroundProps {
@@ -32,7 +32,7 @@ export const RadialGradientBackground: React.FC<RadialGradientBackgroundProps> =
   const frontGradId = `wave-grad-front-${id}`;
 
   // Primary wave: moves smoothly from one end to the other horizontally
-  const wave1Animation = shouldReduceMotion
+  const wave1Animation: TargetAndTransition = shouldReduceMotion
     ? {}
     : {
         x: ["0%", "-50%"],
@@ -40,14 +40,14 @@ export const RadialGradientBackground: React.FC<RadialGradientBackgroundProps> =
           x: {
             duration: 20,
             repeat: Infinity,
-            repeatType: "loop" as const,
+            repeatType: "loop",
             ease: "linear",
           },
         },
       };
 
   // Secondary wave: glides horizontally in opposite direction at a different rhythm
-  const wave2Animation = shouldReduceMotion
+  const wave2Animation: TargetAndTransition = shouldReduceMotion
     ? {}
     : {
         x: ["-50%", "0%"],
@@ -55,14 +55,14 @@ export const RadialGradientBackground: React.FC<RadialGradientBackgroundProps> =
           x: {
             duration: 28,
             repeat: Infinity,
-            repeatType: "loop" as const,
+            repeatType: "loop",
             ease: "linear",
           },
         },
       };
 
   // Ambient horizontal glow: sweeps across the whole section while colors fluctuate
-  const ambientAnimation = shouldReduceMotion
+  const ambientAnimation: TargetAndTransition = shouldReduceMotion
     ? {}
     : {
         x: ["-15%", "15%", "-15%"],
