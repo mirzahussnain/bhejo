@@ -1,9 +1,12 @@
+import React from "react";
 import type { Metadata } from "next";
+import { AuthVisualSide } from "@/components/auth/AuthVisualSide";
+import { AuthHeader } from "@/components/auth/AuthHeader";
 import { LoginForm } from "./LoginForm";
 
 export const metadata: Metadata = {
-  title: "Log In | Bhejo",
-  description: "Sign in to access your Bhejo scan dashboard.",
+  title: "Sign In | Bhejo",
+  description: "Sign in to manage your scan requests, documents, and recipient sessions.",
 };
 
 interface LoginPageProps {
@@ -15,24 +18,27 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const redirectTo = params?.redirectTo || "/dashboard";
 
   return (
-    <main className="min-h-screen bg-slate-50/60 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
-        <div className="flex items-center justify-center gap-3 mb-6">
-          <span className="flex size-10 items-center justify-center rounded-2xl bg-slate-900 text-sm font-bold text-white shadow-xs">
-            B
-          </span>
-          <span className="text-2xl font-bold tracking-tight text-slate-900">Bhejo</span>
-        </div>
-        <h1 className="text-center text-2xl font-bold tracking-tight text-slate-900">
-          Sign in to your account
-        </h1>
-        <p className="mt-2 text-center text-sm text-slate-600">
-          Manage your scan requests, documents, and recipient sessions.
-        </p>
-      </div>
+    <main className="min-h-screen w-full bg-canvas lg:grid lg:grid-cols-2">
+      {/* Left Column: Visual Showcase (Desktop Only) */}
+      <AuthVisualSide
+        imageSrc="/auth-signin.jpg"
+        imageAlt="Person scanning physical lease agreement document with phone camera"
+        title="Zero-App Remote Scanning"
+        description="Recipients tap your link in WhatsApp or browser to scan and crop documents automatically. Live video feeds never touch remote cloud servers."
+      />
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
-        <div className="bg-white py-8 px-6 shadow-xs rounded-3xl border border-slate-200/80 sm:px-10">
+      {/* Right Column: Form Area (Centered on Mobile & Desktop) */}
+      <div className="flex min-h-screen w-full flex-col justify-center bg-canvas-card px-6 py-12 sm:px-10 lg:px-14 xl:px-20">
+        <div className="mx-auto w-full max-w-md">
+          {/* Top Center: Official Bhejo Logo & Logotype */}
+          <AuthHeader
+            title="Welcome Back"
+            subtitle="Don't have an account?"
+            linkText="Sign up"
+            linkHref="/signup"
+          />
+
+          {/* Sign In Form */}
           <LoginForm redirectTo={redirectTo} />
         </div>
       </div>

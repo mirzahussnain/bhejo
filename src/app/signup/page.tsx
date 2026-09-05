@@ -1,4 +1,7 @@
+import React from "react";
 import type { Metadata } from "next";
+import { AuthVisualSide } from "@/components/auth/AuthVisualSide";
+import { AuthHeader } from "@/components/auth/AuthHeader";
 import { SignupForm } from "./SignupForm";
 
 export const metadata: Metadata = {
@@ -8,24 +11,27 @@ export const metadata: Metadata = {
 
 export default function SignupPage() {
   return (
-    <main className="min-h-screen bg-slate-50/60 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
-        <div className="flex items-center justify-center gap-3 mb-6">
-          <span className="flex size-10 items-center justify-center rounded-2xl bg-slate-900 text-sm font-bold text-white shadow-xs">
-            B
-          </span>
-          <span className="text-2xl font-bold tracking-tight text-slate-900">Bhejo</span>
-        </div>
-        <h1 className="text-center text-2xl font-bold tracking-tight text-slate-900">
-          Create your account
-        </h1>
-        <p className="mt-2 text-center text-sm text-slate-600">
-          Start generating secure, link-based document scan requests.
-        </p>
-      </div>
+    <main className="min-h-screen w-full bg-canvas lg:grid lg:grid-cols-2">
+      {/* Left Column: Visual Showcase (Desktop Only) */}
+      <AuthVisualSide
+        imageSrc="/auth-signup.jpg"
+        imageAlt="Professional viewing completed document scan on phone at workspace desk"
+        title="Capture Clean Documents Anywhere"
+        description="Share a private link with clients, patients, or family members. Bhejo detects edges, checks stability, and prepares high-resolution scans in seconds."
+      />
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
-        <div className="bg-white py-8 px-6 shadow-xs rounded-3xl border border-slate-200/80 sm:px-10">
+      {/* Right Column: Form Area (Centered on Mobile & Desktop) */}
+      <div className="flex min-h-screen w-full flex-col justify-center bg-canvas-card px-6 py-12 sm:px-10 lg:px-14 xl:px-20">
+        <div className="mx-auto w-full max-w-md">
+          {/* Top Center: Official Bhejo Logo & Logotype */}
+          <AuthHeader
+            title="Create an account"
+            subtitle="Already have an account?"
+            linkText="Sign in"
+            linkHref="/login"
+          />
+
+          {/* Sign Up Form */}
           <SignupForm />
         </div>
       </div>
