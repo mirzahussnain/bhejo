@@ -423,7 +423,8 @@ export class SupabaseScanSessionRepository implements ScanSessionRepository {
     });
 
     if (!res.ok) {
-      throw new Error(`Failed to insert session: ${res.statusText}`);
+      const errBody = await res.text().catch(() => "");
+      throw new Error(`Failed to insert session: ${res.status} ${res.statusText} - ${errBody}`);
     }
     return session;
   }

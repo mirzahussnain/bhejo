@@ -21,6 +21,12 @@ export async function POST(request: Request) {
     // Body is optional
   }
 
-  const result = await createOwnerSession(owner.ownerId, title, expiryHours);
-  return Response.json(result, { status: 201 });
+  try {
+    const result = await createOwnerSession(owner.ownerId, title, expiryHours);
+    return Response.json(result, { status: 201 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to create session";
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
+
