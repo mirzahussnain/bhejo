@@ -15,10 +15,8 @@ ON CONFLICT (id) DO UPDATE SET
   file_size_limit = 10485760,
   allowed_mime_types = ARRAY['image/jpeg']::text[];
 
--- 2. Enable RLS on storage.objects (if not already enabled)
-ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
-
--- 3. Remove any previous loose storage policies
+-- 2. Storage RLS is enabled by default on storage.objects in Supabase.
+-- Remove any previous loose storage policies
 DROP POLICY IF EXISTS "Owners can view their own session documents" ON storage.objects;
 DROP POLICY IF EXISTS "Owners can delete their own session documents" ON storage.objects;
 
