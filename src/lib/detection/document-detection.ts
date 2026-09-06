@@ -1171,8 +1171,14 @@ export function runDocumentDetection(
       previousCorners,
     );
 
-    // If pooled candidates produced a full-sized document candidate, return it
-    if (pooledWinner && pooledWinner.detection.areaRatio >= 0.10) {
+    // If pooled candidates produced a decisive, full-sized document candidate, return it
+    const isDecisiveFullDocument =
+      pooledWinner !== null &&
+      (isStrongDocumentWinner(pooledWinner) ||
+        (pooledWinner.detection.confidence >= 0.85 &&
+          pooledWinner.detection.areaRatio >= 0.25));
+
+    if (isDecisiveFullDocument) {
       return {
         detection: refineDetection(
           cv,
@@ -1258,11 +1264,17 @@ export function runDocumentDetection(
     let finalWinner = fallbackWinner;
 
     // Pass 4: Low-Contrast Evidence-Fused Document Recovery (P0.5)
-    // Executes ONLY when Passes 1–3 fail to find any full-sized document candidate (area >= 0.10).
+    // Executes when Passes 1–3 fail to find a decisive, full-sized document candidate.
     // Specifically recovers white paper on white desks, light wood, pale counters, or certificates
-    // where physical edge gradient is subtle (3–10) and rejected by Canny's higher thresholds.
+    // where physical edge gradient is subtle (3–10) and rejected by Canny's higher thresholds,
+    // or when Passes 1-3 only found an internal feature (table, photo, chip) of a larger document.
     let pass4Winner: ScoredDocumentCandidate | null = null;
-    if (!finalWinner || finalWinner.detection.areaRatio < 0.10) {
+    const shouldRunLowContrastRecovery =
+      !finalWinner ||
+      finalWinner.detection.areaRatio < 0.25 ||
+      finalWinner.detection.confidence < 0.80;
+
+    if (shouldRunLowContrastRecovery) {
       let pass4Denoised: OpenCV.Mat | null = null;
       let pass4Grad: OpenCV.Mat | null = null;
       let pass4Binary: OpenCV.Mat | null = null;

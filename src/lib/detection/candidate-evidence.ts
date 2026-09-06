@@ -349,8 +349,8 @@ export function hasBalancedBoundaryEvidence(
 
     const effectiveSupport = evidence.sideSupport.map((cannySupp, idx) => {
       const step = rc.sideContrast[idx].stepMagnitude;
-      // Additive bonus: up to +0.45 support if physical region step is strong (>= 15)
-      const rcBonus = clamp(step / 30.0, 0, 0.45);
+      // Additive bonus: low-contrast physical boundaries (step 4-15) receive proportional physical edge support
+      const rcBonus = clamp(step / 18.0, 0, 0.48);
       return Math.max(cannySupp, rcBonus);
     });
 
@@ -361,10 +361,17 @@ export function hasBalancedBoundaryEvidence(
       (s) => s >= strongThreshold,
     ).length;
 
+    // When all 4 sides have consistent polarity step (document interior brighter than exterior background)
+    // with meaningful physical step (>= 3.5), allow balanced low-contrast document boundary to pass
+    const isConsistentLowContrastDoc =
+      rc.polarityConsistency >= 0.75 &&
+      rc.averageStep >= 3.5 &&
+      effectiveStrongCount >= Math.max(2, config.minimumStrongSideCount - 1);
+
     return (
-      effectiveWeakest >= config.minimumSideSupport &&
-      effectiveAverage >= config.minimumAverageSupport &&
-      effectiveStrongCount >= config.minimumStrongSideCount
+      (effectiveWeakest >= config.minimumSideSupport || (isConsistentLowContrastDoc && effectiveWeakest >= 0.08)) &&
+      (effectiveAverage >= config.minimumAverageSupport || (isConsistentLowContrastDoc && effectiveAverage >= 0.28)) &&
+      (effectiveStrongCount >= config.minimumStrongSideCount || isConsistentLowContrastDoc)
     );
   }
 

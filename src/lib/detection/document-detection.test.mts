@@ -593,3 +593,38 @@ test("P0.2: preserves standalone A4 document without false spread merging", () =
   assert.equal(spreads.length, 0, "A4 document must not produce spread candidate");
 });
 
+test("Phase 5B: selectBestCandidate prefers enclosing outer document over internal table feature", () => {
+  // Inner feature (e.g. invoice table, areaRatio 0.12)
+  const innerTable = createMockCandidate(
+    orderCorners([
+      { x: 180, y: 150 },
+      { x: 420, y: 150 },
+      { x: 420, y: 300 },
+      { x: 180, y: 300 },
+    ]),
+    0.12,
+    [0.90, 0.90, 0.90, 0.90],
+  );
+
+  // Outer A4 document (areaRatio 0.42, enclosing the table)
+  const outerDoc = createMockCandidate(
+    orderCorners([
+      { x: 100, y: 40 },
+      { x: 500, y: 40 },
+      { x: 500, y: 440 },
+      { x: 100, y: 440 },
+    ]),
+    0.42,
+    [0.40, 0.40, 0.40, 0.40],
+  );
+
+  const best = selectBestCandidate([innerTable, outerDoc]);
+  assert.ok(best !== null);
+  assert.equal(
+    best,
+    outerDoc,
+    "Enclosing physical document must subordinate internal table feature",
+  );
+});
+
+
