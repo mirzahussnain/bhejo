@@ -22,6 +22,7 @@ import {
   type CandidateBoundaryEvidence,
   type CandidateEvidenceConfig,
   type EdgeMap,
+  type GrayscaleMap,
 } from "./candidate-evidence.ts";
 import {
   refineCorners,
@@ -92,7 +93,7 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   morphologyKernelSize: 3,
   fallbackCannyLowThreshold: 12,
   fallbackCannyHighThreshold: 55,
-  fallbackMorphologyKernelSize: 5,
+  fallbackMorphologyKernelSize: 7,
   coarseBlurKernelSize: 9,
   polygonApproximationRatios: [0.015, 0.02, 0.03],
   minAreaRatio: 0.02,
@@ -149,6 +150,19 @@ export function scoreDocumentCandidate(
   const areaScore = clampScore(
     Math.sqrt(candidate.metrics.areaRatio / targetAreaRatio),
   );
+
+  const rc = boundaryEvidence.regionContrast;
+  if (rc) {
+    return clampScore(
+      areaScore * 0.12 +
+        candidate.metrics.angleScore * 0.15 +
+        candidate.metrics.edgeConsistency * 0.10 +
+        candidate.metrics.boundaryScore * 0.07 +
+        boundaryEvidence.averageSupport * 0.30 +
+        boundaryEvidence.weakestSideSupport * 0.12 +
+        rc.regionContrastScore * 0.14,
+    );
+  }
 
   return clampScore(
     areaScore * 0.14 +
@@ -290,7 +304,11 @@ export function isStrongDocumentWinner(
   if (!winner) {
     return false;
   }
+  const rcOk =
+    !winner.boundaryEvidence.regionContrast ||
+    winner.boundaryEvidence.regionContrast.regionContrastScore >= 0.20;
   return (
+    rcOk &&
     winner.detection.areaRatio >= 0.18 &&
     winner.detection.confidence >= 0.65 &&
     winner.boundaryEvidence.weakestSideSupport >= 0.25 &&
@@ -393,6 +411,18 @@ export function selectBestCandidate(
       continue;
     }
 
+    // An enclosing candidate claiming to be the outer physical document boundary must have
+    // genuine physical contrast against its exterior. If region contrast was measured and shows
+    // negligible step (< 5 intensity) with very low score (< 0.20), candidate A is a background
+    // texture artifact (e.g. tile seam / grid border) and cannot subordinate B.
+    if (
+      candidateA.boundaryEvidence.regionContrast &&
+      candidateA.boundaryEvidence.regionContrast.averageStep < 5.0 &&
+      candidateA.boundaryEvidence.regionContrast.regionContrastScore < 0.20
+    ) {
+      continue;
+    }
+
     for (const candidateB of candidates) {
       if (candidateA === candidateB) {
         continue;
@@ -462,6 +492,7 @@ export function generateSpreadCandidates(
   frameWidth: number,
   frameHeight: number,
   config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  grayMap?: GrayscaleMap,
 ): readonly ScoredDocumentCandidate[] {
   if (candidates.length < 2) {
     return [];
@@ -656,6 +687,7 @@ export function generateSpreadCandidates(
         edgeMap,
         validated.corners,
         config.standardEvidence,
+        grayMap,
       );
 
       // Must have balanced boundary evidence on all outer edges
@@ -684,6 +716,7 @@ function findContourCandidates(
   config: DocumentDetectorConfig,
   strategy: Exclude<DocumentCandidateStrategy, "weak-edge-reconstruction" | "open-spread-hypothesis">,
   allowReconstruction: boolean,
+  grayMap?: GrayscaleMap,
 ): ContourSearchResult {
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
@@ -746,6 +779,7 @@ function findContourCandidates(
             } satisfies EdgeMap,
             quadrilateral.corners,
             config.standardEvidence,
+            grayMap,
           );
           if (!hasBalancedBoundaryEvidence(boundaryEvidence, config.standardEvidence)) {
             continue;
@@ -779,6 +813,7 @@ function findContourCandidates(
               } satisfies EdgeMap,
               reconstructed.corners,
               config.reconstructionEvidence,
+              grayMap,
             )
           : null;
         if (
@@ -941,13 +976,18 @@ export function runDocumentDetection(
   let claheResult: OpenCV.Mat | null = null;
   let coarseBlurred: OpenCV.Mat | null = null;
   let coarseGrad: OpenCV.Mat | null = null;
-  let coarseGradMask: OpenCV.Mat | null = null;
   let adaptiveEdges: OpenCV.Mat | null = null;
   let fusedEdges: OpenCV.Mat | null = null;
   let otsuDummy: OpenCV.Mat | null = null;
+  let thresholds: AdaptiveThresholds | null = null;
 
   try {
     cv.cvtColor(source, grayscale, cv.COLOR_RGBA2GRAY);
+    const grayMap: GrayscaleMap = {
+      data: grayscale.data,
+      width: frame.width,
+      height: frame.height,
+    };
     claheResult = preprocessFrame(cv, grayscale, blurred, config);
 
     // Pass 1: Standard fixed-threshold Canny (30 / 100)
@@ -974,6 +1014,7 @@ export function runDocumentDetection(
       config,
       "standard-edge-contour",
       false,
+      grayMap,
     );
 
     const standardEdgeMap: EdgeMap = {
@@ -990,6 +1031,7 @@ export function runDocumentDetection(
             frame.width,
             frame.height,
             config,
+            grayMap,
           )
         : [];
 
@@ -1053,7 +1095,7 @@ export function runDocumentDetection(
         255,
         cv.THRESH_BINARY | cv.THRESH_OTSU,
       );
-      const thresholds = computeAdaptiveEdgeThresholds(rawOtsu as number);
+      thresholds = computeAdaptiveEdgeThresholds(rawOtsu as number);
 
       adaptiveEdges = new cv.Mat();
       cv.Canny(
@@ -1065,31 +1107,10 @@ export function runDocumentDetection(
         true,
       );
 
-      // Reconnect fragmented boundaries via morphological closing
-      cv.morphologyEx(
-        adaptiveEdges,
-        adaptiveEdges,
-        cv.MORPH_CLOSE,
-        fallbackKernel,
-        new cv.Point(-1, -1),
-        1,
-      );
-
-      // Macro-scale gradient mask suppresses high-frequency wood grain and text lines
-      coarseGradMask = new cv.Mat();
-      cv.threshold(
-        coarseGrad,
-        coarseGradMask,
-        thresholds.macroCutoff,
-        255,
-        cv.THRESH_BINARY,
-      );
-
-      // Multi-scale evidence fusion: keep closed Canny edges confirmed by macro boundary gradient
+      // Reconnect fragmented boundaries via conservative morphological closing (3x3)
       fusedEdges = new cv.Mat();
-      cv.bitwise_and(adaptiveEdges, coarseGradMask, fusedEdges);
       cv.morphologyEx(
-        fusedEdges,
+        adaptiveEdges,
         fusedEdges,
         cv.MORPH_CLOSE,
         standardKernel,
@@ -1104,6 +1125,7 @@ export function runDocumentDetection(
         config,
         "adaptive-edge-contour",
         false,
+        grayMap,
       );
 
       totalContourCount += adaptiveResult.contourCount;
@@ -1135,6 +1157,7 @@ export function runDocumentDetection(
             frame.width,
             frame.height,
             config,
+            grayMap,
           )
         : [];
 
@@ -1147,7 +1170,8 @@ export function runDocumentDetection(
       previousCorners,
     );
 
-    if (pooledWinner) {
+    // If pooled candidates produced a full-sized document candidate, return it
+    if (pooledWinner && pooledWinner.detection.areaRatio >= 0.10) {
       return {
         detection: refineDetection(
           cv,
@@ -1163,11 +1187,19 @@ export function runDocumentDetection(
     }
 
     // Pass 3: Fallback weak reconstruction (minAreaRect for rounded/clipped contours)
+    // Runs when no candidate was found or when only tiny internal features (area < 0.10) were found.
+    // Derive safe adaptive thresholds for low-contrast scenes
+    const safePass3High = Math.min(
+      config.fallbackCannyHighThreshold,
+      Math.max(18, Math.round((thresholds?.cannyHigh ?? 35) * 0.55)),
+    );
+    const safePass3Low = Math.max(8, Math.round(safePass3High * 0.40));
+
     cv.Canny(
       blurred,
       edges,
-      config.fallbackCannyLowThreshold,
-      config.fallbackCannyHighThreshold,
+      safePass3Low,
+      safePass3High,
       3,
       true,
     );
@@ -1186,13 +1218,38 @@ export function runDocumentDetection(
       config,
       "weak-edge-contour",
       true,
+      grayMap,
     );
 
     totalContourCount += fallbackResult.contourCount;
     totalQuadrilateralCount += fallbackResult.quadrilateralCount;
 
+    // Combine fallback candidates with earlier candidates to allow containment resolution
+    // (e.g. newly discovered outer document boundary enclosing internal photo/chip from Pass 1)
+    const pass3EdgeMap: EdgeMap = {
+      data: edges.data,
+      width: frame.width,
+      height: frame.height,
+    };
+
+    const pooledPass3 = [...allCandidates, ...fallbackResult.candidates];
+    const fallbackSpreads =
+      pooledPass3.length >= 2
+        ? generateSpreadCandidates(
+            pooledPass3,
+            pass3EdgeMap,
+            frame.width,
+            frame.height,
+            config,
+            grayMap,
+          )
+        : [];
+
+    totalQuadrilateralCount += fallbackSpreads.length;
+    const finalPool = [...pooledPass3, ...fallbackSpreads];
+
     const fallbackWinner = selectBestCandidate(
-      fallbackResult.candidates,
+      finalPool,
       config,
       previousCorners,
     );
@@ -1218,7 +1275,6 @@ export function runDocumentDetection(
     otsuDummy?.delete();
     fusedEdges?.delete();
     adaptiveEdges?.delete();
-    coarseGradMask?.delete();
     coarseGrad?.delete();
     coarseBlurred?.delete();
     fallbackKernel.delete();
