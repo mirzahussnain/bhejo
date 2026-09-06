@@ -104,8 +104,12 @@ export function CameraScanner({
   const stabilityTrackerRef = useRef(new DocumentStabilityTracker());
   const autoCaptureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recentFrameBufferRef = useRef(new RecentFrameBuffer(2));
-  const lastBufferedTimeRef = useRef(0);
   const lastCaptureDiagnosticsRef = useRef<CaptureDiagnostics | null>(null);
+  const currentCaptureRef = useRef(currentCapture);
+
+  useEffect(() => {
+    currentCaptureRef.current = currentCapture;
+  }, [currentCapture]);
 
   useEffect(() => {
     window.__bhejoCaptureDiagnostics = () => lastCaptureDiagnosticsRef.current;
@@ -173,6 +177,17 @@ export function CameraScanner({
         // Capture settle window: brief 80ms settle if manual capture to allow camera focus/exposure stabilization
         if (source === "manual") {
           await new Promise<void>((resolve) => setTimeout(resolve, 80));
+        }
+
+        // Snapshot a fallback video frame at trigger moment before attempting ImageCapture.
+        // If ImageCapture fails or times out, this provides a crisp pre-movement video backup
+        // without running heavy canvas allocations continuously during live preview.
+        if (videoRef.current && liveAnalysisRef.current.detection) {
+          recentFrameBufferRef.current.recordFrame(
+            videoRef.current,
+            liveAnalysisRef.current.detection.confidence,
+            performance.now(),
+          );
         }
 
         // Attempt high-quality still capture using ImageCapture
@@ -377,21 +392,6 @@ export function CameraScanner({
       liveAnalysisRef.current = nextAnalysis;
       setLiveAnalysis(nextAnalysis);
 
-      // Buffer high-quality candidate video frame for instant fallback if ImageCapture fails
-      if (
-        videoRef.current &&
-        detection !== null &&
-        (quality?.isAcceptable ?? false) &&
-        frame.timestamp - lastBufferedTimeRef.current >= 200
-      ) {
-        lastBufferedTimeRef.current = frame.timestamp;
-        recentFrameBufferRef.current.recordFrame(
-          videoRef.current,
-          detection.confidence,
-          frame.timestamp,
-        );
-      }
-
       const decision = captureControllerRef.current.observe(
         {
           documentDetected: detection !== null,
@@ -407,7 +407,7 @@ export function CameraScanner({
         scheduleAutomaticCapture();
       }
     },
-    [clearAutoCaptureTimer, scheduleAutomaticCapture, videoRef],
+    [clearAutoCaptureTimer, scheduleAutomaticCapture],
   );
 
   const processDocumentFrame = useDocumentDetection(
@@ -435,8 +435,11 @@ export function CameraScanner({
       controller.reset();
       stabilityTracker.reset();
       recentFrameBuffer.releaseAll();
+      if (currentCaptureRef.current?.previewUrl) {
+        session.revokePreviewUrl(currentCaptureRef.current.previewUrl);
+      }
     };
-  }, [clearAutoCaptureTimer]);
+  }, [clearAutoCaptureTimer, session]);
 
   // Reset when analysis becomes inactive
   useEffect(() => {

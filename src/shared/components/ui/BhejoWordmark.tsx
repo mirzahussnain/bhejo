@@ -2,7 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-import { motion, useReducedMotion } from "motion/react";
+import { motion } from "motion/react";
 import { BhejoLogo } from "./BhejoLogo";
 
 interface BhejoWordmarkProps {
@@ -26,8 +26,6 @@ export function BhejoWordmark({
   className = "",
   href = "/",
 }: BhejoWordmarkProps) {
-  const shouldReduceMotion = useReducedMotion();
-
   const logoSize = size === "sm" ? 28 : size === "lg" ? 44 : 34;
   const titleSizeClass =
     size === "sm"
