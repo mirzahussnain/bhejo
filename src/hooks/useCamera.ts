@@ -167,9 +167,15 @@ export function useCamera() {
     };
   }, [releaseCamera, startCamera]);
 
+  const getMediaStream = useCallback((): MediaStream | null => {
+    return streamRef.current;
+  }, []);
+
   return {
     status,
     videoRef,
+    streamRef,
+    getMediaStream,
     startCamera,
     stopCamera,
   };
