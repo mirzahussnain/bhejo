@@ -109,10 +109,15 @@ export function CameraScanner({
   const recentFrameBufferRef = useRef(new RecentFrameBuffer(2));
   const lastCaptureDiagnosticsRef = useRef<CaptureDiagnostics | null>(null);
   const currentCaptureRef = useRef(currentCapture);
+  const sessionRef = useRef(session);
 
   useEffect(() => {
     currentCaptureRef.current = currentCapture;
   }, [currentCapture]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   useEffect(() => {
     window.__bhejoCaptureDiagnostics = () => lastCaptureDiagnosticsRef.current;
@@ -331,7 +336,7 @@ export function CameraScanner({
         };
 
         controller.completeCapture(performance.now());
-        const previewUrl = session.createPreviewUrl(result.image);
+        const previewUrl = sessionRef.current.createPreviewUrl(result.image);
 
         setCurrentCapture({
           blob: result.image,
@@ -339,9 +344,10 @@ export function CameraScanner({
           correctionFallback: result.correctionFailed,
         });
         setUiMode("page-preview");
-      } catch {
+      } catch (err) {
+        console.error("[CameraScanner] Capture processing error:", err);
         controller.failCapture();
-        if (mountedRef.current && operationId === operationIdRef.current) {
+        if (mountedRef.current) {
           setIsProcessingError(true);
         }
       } finally {
@@ -350,7 +356,7 @@ export function CameraScanner({
           capturedFrameCanvas.height = 0;
         }
         recentFrameBufferRef.current.releaseAll();
-        if (mountedRef.current && operationId === operationIdRef.current) {
+        if (mountedRef.current) {
           setCapturePending(false);
           setIsProcessing(false);
         }
@@ -361,7 +367,6 @@ export function CameraScanner({
       clearAutoCaptureTimer,
       getMediaStream,
       isProcessing,
-      session,
       status,
       stopCamera,
       videoRef,
@@ -439,10 +444,10 @@ export function CameraScanner({
       stabilityTracker.reset();
       recentFrameBuffer.releaseAll();
       if (currentCaptureRef.current?.previewUrl) {
-        session.revokePreviewUrl(currentCaptureRef.current.previewUrl);
+        sessionRef.current.revokePreviewUrl(currentCaptureRef.current.previewUrl);
       }
     };
-  }, [clearAutoCaptureTimer, session]);
+  }, [clearAutoCaptureTimer]);
 
   // Reset when analysis becomes inactive
   useEffect(() => {

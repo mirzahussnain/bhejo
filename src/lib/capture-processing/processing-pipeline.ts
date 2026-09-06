@@ -61,17 +61,27 @@ export function canvasToJpeg(
 ): Promise<Blob> {
   const resolvedQuality = resolveJpegQuality(quality);
   return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (blob) {
-          resolve(blob);
-          return;
-        }
-        reject(new Error("The scan could not be prepared."));
-      },
-      "image/jpeg",
-      resolvedQuality,
-    );
+    const timer = setTimeout(() => {
+      reject(new Error("The scan could not be prepared in time."));
+    }, 8000);
+
+    try {
+      canvas.toBlob(
+        (blob) => {
+          clearTimeout(timer);
+          if (blob) {
+            resolve(blob);
+            return;
+          }
+          reject(new Error("The scan could not be prepared."));
+        },
+        "image/jpeg",
+        resolvedQuality,
+      );
+    } catch (err) {
+      clearTimeout(timer);
+      reject(err);
+    }
   });
 }
 
