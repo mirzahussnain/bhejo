@@ -463,17 +463,21 @@ export function calculatePerspectiveOutputDimensions(
   };
 }
 
-export function warpPerspectiveToCanvas(
+export interface WarpedPerspectiveResult {
+  readonly warpedMat: InstanceType<typeof OpenCV.Mat>;
+  readonly dimensions: PerspectiveOutputDimensions;
+}
+
+export function warpPerspectiveMat(
   cv: typeof OpenCV,
-  sourceCanvas: HTMLCanvasElement,
+  sourceMat: InstanceType<typeof OpenCV.Mat>,
   corners: DocumentCorners,
-  targetCanvas: HTMLCanvasElement,
   config: PerspectiveTransformConfig = DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
   marginRatio = 0.015,
-): PerspectiveOutputDimensions {
+): WarpedPerspectiveResult {
   const sourceDimensions = {
-    width: sourceCanvas.width,
-    height: sourceCanvas.height,
+    width: sourceMat.cols,
+    height: sourceMat.rows,
   };
   if (!isValidPerspectiveQuadrilateral(corners, sourceDimensions, config)) {
     throw new Error("The document edges are not usable for correction.");
@@ -489,7 +493,6 @@ export function warpPerspectiveToCanvas(
     throw new Error("The document size is not usable for correction.");
   }
 
-  const source = cv.imread(sourceCanvas);
   const transformSource = cv.matFromArray(
     4,
     1,
@@ -514,7 +517,7 @@ export function warpPerspectiveToCanvas(
 
   try {
     cv.warpPerspective(
-      source,
+      sourceMat,
       warped,
       transform,
       new cv.Size(output.width, output.height),
@@ -522,15 +525,56 @@ export function warpPerspectiveToCanvas(
       cv.BORDER_REPLICATE,
       new cv.Scalar(),
     );
-    targetCanvas.width = output.width;
-    targetCanvas.height = output.height;
-    cv.imshow(targetCanvas, warped);
-    return output;
-  } finally {
+    return {
+      warpedMat: warped,
+      dimensions: output,
+    };
+  } catch (err) {
     warped.delete();
+    throw err;
+  } finally {
     transform.delete();
     transformDestination.delete();
     transformSource.delete();
+  }
+}
+
+export function warpPerspectiveToMat(
+  cv: typeof OpenCV,
+  sourceCanvas: HTMLCanvasElement,
+  corners: DocumentCorners,
+  config: PerspectiveTransformConfig = DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
+  marginRatio = 0.015,
+): WarpedPerspectiveResult {
+  const source = cv.imread(sourceCanvas);
+  try {
+    return warpPerspectiveMat(cv, source, corners, config, marginRatio);
+  } finally {
     source.delete();
+  }
+}
+
+export function warpPerspectiveToCanvas(
+  cv: typeof OpenCV,
+  sourceCanvas: HTMLCanvasElement,
+  corners: DocumentCorners,
+  targetCanvas: HTMLCanvasElement,
+  config: PerspectiveTransformConfig = DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
+  marginRatio = 0.015,
+): PerspectiveOutputDimensions {
+  const { warpedMat, dimensions } = warpPerspectiveToMat(
+    cv,
+    sourceCanvas,
+    corners,
+    config,
+    marginRatio,
+  );
+  try {
+    targetCanvas.width = dimensions.width;
+    targetCanvas.height = dimensions.height;
+    cv.imshow(targetCanvas, warpedMat);
+    return dimensions;
+  } finally {
+    warpedMat.delete();
   }
 }

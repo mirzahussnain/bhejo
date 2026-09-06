@@ -6,15 +6,14 @@ import {
   type FrameDimensions,
 } from "./coordinate-mapping.ts";
 import {
-  enhanceCanvasWithOpenCv,
-  enhanceCanvas,
+  enhanceMatWithOpenCv,
   resolveEnhancementConfig,
   type ScanEnhancementConfig,
   type ScanQualityProfile,
 } from "./enhancement.ts";
 import {
   DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
-  warpPerspectiveToCanvas,
+  warpPerspectiveToMat,
   type PerspectiveOutputDimensions,
   type PerspectiveTransformConfig,
 } from "./perspective-transform.ts";
@@ -118,6 +117,7 @@ export async function processCapturedFrame(
     };
   }
 
+  let outputCanvas: HTMLCanvasElement | null = null;
   try {
     const mapping = createFullFrameCoordinateMapping(
       analysisDimensions,
@@ -129,35 +129,39 @@ export async function processCapturedFrame(
       throw new Error("The detected document position is not usable.");
     }
 
-    const outputCanvas = document.createElement("canvas");
     const cv = await loadOpenCv();
-    const dimensions = warpPerspectiveToCanvas(
+    const { warpedMat, dimensions } = warpPerspectiveToMat(
       cv,
       capturedFrame.canvas,
       captureCorners,
-      outputCanvas,
       resolvedPerspective,
     );
 
     let enhancementFailed = false;
     try {
-      enhanceCanvasWithOpenCv(cv, outputCanvas, resolvedEnhancement);
-    } catch {
       try {
-        enhanceCanvas(outputCanvas, resolvedEnhancement);
+        enhanceMatWithOpenCv(cv, warpedMat, resolvedEnhancement);
       } catch {
         enhancementFailed = true;
       }
-    }
 
-    return {
-      image: await canvasToJpeg(outputCanvas, resolvedQuality),
-      dimensions,
-      usedFallback: false,
-      correctionFailed: false,
-      enhancementFailed,
-      durationMs: performance.now() - startedAt,
-    };
+      outputCanvas = document.createElement("canvas");
+      outputCanvas.width = dimensions.width;
+      outputCanvas.height = dimensions.height;
+      cv.imshow(outputCanvas, warpedMat);
+
+      const image = await canvasToJpeg(outputCanvas, resolvedQuality);
+      return {
+        image,
+        dimensions,
+        usedFallback: false,
+        correctionFailed: false,
+        enhancementFailed,
+        durationMs: performance.now() - startedAt,
+      };
+    } finally {
+      warpedMat.delete();
+    }
   } catch {
     return {
       image: await canvasToJpeg(capturedFrame.canvas, resolvedQuality),
@@ -167,5 +171,10 @@ export async function processCapturedFrame(
       enhancementFailed: false,
       durationMs: performance.now() - startedAt,
     };
+  } finally {
+    if (outputCanvas) {
+      outputCanvas.width = 0;
+      outputCanvas.height = 0;
+    }
   }
 }

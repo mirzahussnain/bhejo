@@ -284,3 +284,30 @@ test("P0.4: NaN and Infinity protection prevents corrupt dimensions", () => {
   assert.equal(outputInf, null, "Infinity corner must return null");
 });
 
+test("Phase 5B: warpPerspectiveMat transforms directly between Mat buffers without canvas overhead", async () => {
+  const { loadOpenCv } = await import("../detection/opencv-loader.ts");
+  const { warpPerspectiveMat } = await import("./perspective-transform.ts");
+  const cv = await loadOpenCv();
+
+  const sourceMat = new cv.Mat(600, 800, cv.CV_8UC4);
+  const corners: [Point, Point, Point, Point] = [
+    { x: 100, y: 80 },
+    { x: 700, y: 120 },
+    { x: 680, y: 520 },
+    { x: 120, y: 480 },
+  ];
+
+  try {
+    const { warpedMat, dimensions } = warpPerspectiveMat(cv, sourceMat, corners);
+    try {
+      assert.ok(warpedMat);
+      assert.equal(warpedMat.cols, dimensions.width);
+      assert.equal(warpedMat.rows, dimensions.height);
+      assert.ok(dimensions.width > 0 && dimensions.height > 0);
+    } finally {
+      warpedMat.delete();
+    }
+  } finally {
+    sourceMat.delete();
+  }
+});
