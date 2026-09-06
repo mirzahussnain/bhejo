@@ -8,6 +8,8 @@
 export interface CaptureQualityConfig {
   readonly minLaplacianVarianceStill: number;
   readonly minLaplacianVarianceVideo: number;
+  readonly minActiveSharpnessStill: number;
+  readonly minActiveSharpnessVideo: number;
   readonly maxUnderexposedRatio: number;
   readonly maxOverexposedRatio: number;
   readonly maxMotionAnisotropy: number;
@@ -18,6 +20,8 @@ export const DEFAULT_CAPTURE_QUALITY_CONFIG: CaptureQualityConfig = {
   // Conservative thresholds: only catch severe degradation
   minLaplacianVarianceStill: 35,
   minLaplacianVarianceVideo: 20,
+  minActiveSharpnessStill: 40,
+  minActiveSharpnessVideo: 25,
   maxUnderexposedRatio: 0.85,
   maxOverexposedRatio: 0.80,
   maxMotionAnisotropy: 4.5,
@@ -27,6 +31,7 @@ export const DEFAULT_CAPTURE_QUALITY_CONFIG: CaptureQualityConfig = {
 export interface CaptureQualityEvaluation {
   readonly isAcceptable: boolean;
   readonly sharpness: number;
+  readonly activeSharpness?: number;
   readonly isBlurry: boolean;
   readonly isUnderexposed: boolean;
   readonly isOverexposed: boolean;
@@ -181,6 +186,10 @@ export function evaluateCaptureQuality(
   let lapSumSq = 0;
   let lapCount = 0;
 
+  let activeLapSum = 0;
+  let activeLapSumSq = 0;
+  let activeCount = 0;
+
   let dxSumSq = 0;
   let dySumSq = 0;
 
@@ -205,12 +214,25 @@ export function evaluateCaptureQuality(
       const dy = down - up;
       dxSumSq += dx * dx;
       dySumSq += dy * dy;
+
+      // Active edge / text stroke check (isolates printed text from blank paper substrate)
+      const absLap = Math.abs(lap);
+      const gradMag = Math.abs(dx) + Math.abs(dy);
+      if (absLap >= 4 || gradMag >= 6) {
+        activeLapSum += lap;
+        activeLapSumSq += lap * lap;
+        activeCount++;
+      }
     }
   }
 
   const lapMean = lapCount > 0 ? lapSum / lapCount : 0;
   const lapVar = lapCount > 0 ? lapSumSq / lapCount - lapMean * lapMean : 0;
   const sharpness = Math.max(0, lapVar);
+
+  const activeLapMean = activeCount > 0 ? activeLapSum / activeCount : 0;
+  const activeSharpness =
+    activeCount > 0 ? Math.max(0, activeLapSumSq / activeCount - activeLapMean * activeLapMean) : 0;
 
   // Directional motion blur detection:
   // When motion blur occurs in a specific direction (e.g. horizontal camera shake),
@@ -224,7 +246,21 @@ export function evaluateCaptureQuality(
       ? config.minLaplacianVarianceStill
       : config.minLaplacianVarianceVideo;
 
-  const isBlurry = sharpness < minSharpness;
+  const minActiveSharpness =
+    method === "image-capture"
+      ? (config.minActiveSharpnessStill ?? 40)
+      : (config.minActiveSharpnessVideo ?? 25);
+
+  const activeFraction = lapCount > 0 ? activeCount / lapCount : 0;
+  const hasSufficientActiveContent = activeCount >= 80 && activeFraction >= 0.008;
+
+  // Passes sharpness either via global threshold (for dense ID cards/passports)
+  // or via active-pixel sharpness (for A4 documents where blank white margins dilute global variance)
+  const passesSharpness =
+    sharpness >= minSharpness ||
+    (hasSufficientActiveContent && activeSharpness >= minActiveSharpness);
+
+  const isBlurry = !passesSharpness;
   // Severe motion blur: sharpness dropped significantly AND one direction has 4.5x more gradient
   const isSevereMotion =
     sharpness < minSharpness * 1.5 && motionAnisotropy > config.maxMotionAnisotropy;
@@ -241,6 +277,7 @@ export function evaluateCaptureQuality(
   return {
     isAcceptable,
     sharpness,
+    activeSharpness,
     isBlurry,
     isUnderexposed,
     isOverexposed,

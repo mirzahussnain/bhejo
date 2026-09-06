@@ -230,3 +230,91 @@ test("Perspective Resolution Snapping: Supports 4096px / 16MP maximum ceiling fo
   assert.equal(output.height, 3024);
   assert.ok(output.width * output.height > 12_000_000);
 });
+
+test("Phase 5B Quality Gate Benchmark: Active-pixel sharpness across A4, ID, Passport, and Spread", () => {
+  // 1. A4 in-focus with wide margins (75% blank paper, 25% text)
+  const a4SharpCanvas = createTestCanvas(1200, 1600, (x, y) => {
+    if (x < 200 || x > 1000 || y < 250 || y > 1350) return [245, 245, 245];
+    const inLine = (y % 28) < 8;
+    if (!inLine) return [245, 245, 245];
+    const isInk = (x % 14) < 9;
+    return isInk ? [30, 30, 30] : [245, 245, 245];
+  });
+  const a4SharpEval = evaluateCaptureQuality(a4SharpCanvas, "image-capture");
+  assert.equal(a4SharpEval.isAcceptable, true, "In-focus A4 with wide margins must be accepted");
+  assert.ok(
+    (a4SharpEval.activeSharpness ?? 0) >= 40,
+    `Active sharpness should be >= 40, got ${a4SharpEval.activeSharpness}`,
+  );
+
+  // 2. A4 blurry (out of focus, smudged text)
+  const a4BlurryCanvas = createTestCanvas(1200, 1600, (x, y) => {
+    if (x < 200 || x > 1000 || y < 250 || y > 1350) return [245, 245, 245];
+    const lineY = y % 28;
+    if (lineY > 14) return [245, 245, 245];
+    const factor = Math.sin((lineY / 14) * Math.PI);
+    const val = Math.round(245 - 40 * factor);
+    return [val, val, val];
+  });
+  const a4BlurryEval = evaluateCaptureQuality(a4BlurryCanvas, "image-capture");
+  assert.equal(a4BlurryEval.isAcceptable, false, "Blurry A4 must be rejected");
+  assert.ok(
+    a4BlurryEval.rejectionReason === "severe-blur" || a4BlurryEval.rejectionReason === "severe-motion",
+    `Rejection reason should indicate blur/motion, got ${a4BlurryEval.rejectionReason}`,
+  );
+
+  // 3. ID card in-focus
+  const idSharpCanvas = createTestCanvas(1200, 800, (x, y) => {
+    return ((x % 8 < 4) !== (y % 8 < 4)) ? [40, 40, 40] : [230, 230, 230];
+  });
+  const idSharpEval = evaluateCaptureQuality(idSharpCanvas, "image-capture");
+  assert.equal(idSharpEval.isAcceptable, true, "In-focus ID card must be accepted");
+
+  // 4. ID card blurry
+  const idBlurryCanvas = createTestCanvas(1200, 800, (x, y) => {
+    const s = Math.sin(x / 16) * Math.cos(y / 16);
+    const val = Math.round(135 + s * 15);
+    return [val, val, val];
+  });
+  const idBlurryEval = evaluateCaptureQuality(idBlurryCanvas, "image-capture");
+  assert.equal(idBlurryEval.isAcceptable, false, "Blurry ID card must be rejected");
+
+  // 5. Passport in-focus
+  const passportSharpCanvas = createTestCanvas(1200, 1600, (x, y) => {
+    const isMRZ = y > 1300 && (y % 16 < 6) && (x % 8 < 6);
+    if (isMRZ) return [30, 30, 30];
+    const isLine = (y % 24 < 6) && (x % 10 < 6);
+    return isLine ? [40, 40, 40] : [240, 240, 240];
+  });
+  const passportSharpEval = evaluateCaptureQuality(passportSharpCanvas, "image-capture");
+  assert.equal(passportSharpEval.isAcceptable, true, "In-focus passport must be accepted");
+
+  // 6. Passport blurry
+  const passportBlurryCanvas = createTestCanvas(1200, 1600, (x, y) => {
+    const s = Math.sin(y / 18);
+    const val = Math.round(210 - 20 * Math.abs(s));
+    return [val, val, val];
+  });
+  const passportBlurryEval = evaluateCaptureQuality(passportBlurryCanvas, "image-capture");
+  assert.equal(passportBlurryEval.isAcceptable, false, "Blurry passport must be rejected");
+
+  // 7. Open passport spread in-focus
+  const spreadSharpCanvas = createTestCanvas(1600, 1200, (x, y) => {
+    const isSpine = Math.abs(x - 800) < 10;
+    if (isSpine) return [60, 60, 60];
+    const inLine = (y % 24 < 6) && (x % 12 < 7);
+    return inLine ? [35, 35, 35] : [240, 240, 240];
+  });
+  const spreadSharpEval = evaluateCaptureQuality(spreadSharpCanvas, "image-capture");
+  assert.equal(spreadSharpEval.isAcceptable, true, "In-focus spread must be accepted");
+
+  // 8. Open passport spread blurry
+  const spreadBlurryCanvas = createTestCanvas(1600, 1200, (x, y) => {
+    const s = Math.sin(y / 22);
+    const val = Math.round(210 - 18 * Math.abs(s));
+    return [val, val, val];
+  });
+  const spreadBlurryEval = evaluateCaptureQuality(spreadBlurryCanvas, "image-capture");
+  assert.equal(spreadBlurryEval.isAcceptable, false, "Blurry spread must be rejected");
+});
+
