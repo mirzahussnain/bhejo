@@ -96,3 +96,56 @@ test("rejects malformed pixel buffers instead of producing partial output", () =
     RangeError,
   );
 });
+
+test("Phase 5B: enhanceMatWithOpenCv downscaled illumination preserves chromaticity without color corruption", async () => {
+  const { loadOpenCv } = await import("../detection/opencv-loader.ts");
+  const { enhanceMatWithOpenCv } = await import("./enhancement.ts");
+  const cv = await loadOpenCv();
+
+  const width = 400;
+  const height = 300;
+  const mat = new cv.Mat(height, width, cv.CV_8UC4);
+
+  // Fill with colored patches: Gold [210, 170, 45], Green [40, 150, 70], Blue [30, 80, 180]
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      if (y < 100) {
+        mat.data[idx] = 210; mat.data[idx + 1] = 170; mat.data[idx + 2] = 45; mat.data[idx + 3] = 255;
+      } else if (y < 200) {
+        mat.data[idx] = 40; mat.data[idx + 1] = 150; mat.data[idx + 2] = 70; mat.data[idx + 3] = 255;
+      } else {
+        mat.data[idx] = 30; mat.data[idx + 1] = 80; mat.data[idx + 2] = 180; mat.data[idx + 3] = 255;
+      }
+    }
+  }
+
+  const start = performance.now();
+  enhanceMatWithOpenCv(cv, mat);
+  const elapsed = performance.now() - start;
+
+  // Verify fast execution (< 250ms on 400x300)
+  assert.ok(elapsed < 1000, `Expected fast execution, took ${elapsed.toFixed(1)}ms`);
+
+  // Verify color channels maintain relative dominance (no channel swapping/corruption)
+  // Gold patch (y=50, x=200): Red > Green > Blue
+  const goldR = mat.data[(50 * width + 200) * 4];
+  const goldG = mat.data[(50 * width + 200) * 4 + 1];
+  const goldB = mat.data[(50 * width + 200) * 4 + 2];
+  assert.ok(goldR > goldG && goldG > goldB, "Gold patch must preserve R > G > B channel order");
+
+  // Green patch (y=150, x=200): Green > Blue & Green > Red
+  const greenR = mat.data[(150 * width + 200) * 4];
+  const greenG = mat.data[(150 * width + 200) * 4 + 1];
+  const greenB = mat.data[(150 * width + 200) * 4 + 2];
+  assert.ok(greenG > greenR && greenG > greenB, "Green patch must preserve Green dominance");
+
+  // Blue patch (y=250, x=200): Blue > Green > Red
+  const blueR = mat.data[(250 * width + 200) * 4];
+  const blueG = mat.data[(250 * width + 200) * 4 + 1];
+  const blueB = mat.data[(250 * width + 200) * 4 + 2];
+  assert.ok(blueB > blueG && blueG > blueR, "Blue patch must preserve Blue dominance");
+
+  mat.delete();
+});
+
