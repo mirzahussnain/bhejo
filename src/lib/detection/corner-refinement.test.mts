@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   collectEdgePixelsAlongSide,
   findPhysicalBoundaryLine,
+  fitLineHuber,
   intersectLines,
+  sampleNormalDirectedBoundaryPoints,
   DEFAULT_CORNER_REFINEMENT_CONFIG,
 } from "./corner-refinement.ts";
 import type { EdgeMap } from "./candidate-evidence.ts";
@@ -636,4 +638,141 @@ test("11. Physical boundary outward preference vs dense parallel internal struct
   // Must lock onto the outer physical boundary at y=350, not the inner parallel line at y=344
   assert.ok(Math.abs(fitted.y0 - 350) <= 0.5, `Fitted y0 was ${fitted.y0}, expected ~350`);
 });
+
+test("12. P0.3 fitLineHuber resists inward pull from nearby internal text/MRZ outliers", () => {
+  // 40 true edge points along y = 100.0 (from x=10 to x=50)
+  const points: Point[] = [];
+  for (let x = 10; x <= 50; x += 1) {
+    points.push({ x, y: 100.0 });
+  }
+
+  // 12 internal text/MRZ character edge points sitting 4px inside at y = 96.0 (from x=20 to x=32)
+  for (let x = 20; x <= 31; x += 1) {
+    points.push({ x, y: 96.0 });
+  }
+
+  const referenceDir = { x: 1, y: 0 };
+  const fitted = fitLineHuber(points, referenceDir, 1.25);
+
+  assert.ok(fitted);
+  // With 12 outlier points at y=96 and 40 true points at y=100, standard unweighted average is y=99.08.
+  // Huber-weighted fit should downweight the outliers and lock onto y=100 with error < 0.15px!
+  assert.ok(
+    Math.abs(fitted.y0 - 100.0) < 0.15,
+    `Huber fitted y0 was ${fitted.y0}, expected < 0.15px deviation from 100.0`,
+  );
+  assert.ok(
+    Math.abs(fitted.vy) < 0.01,
+    `Fitted line should remain horizontal, vy: ${fitted.vy}`,
+  );
+});
+
+test("13. P0.3 sampleNormalDirectedBoundaryPoints isolates outer boundary from internal text", () => {
+  const width = 200;
+  const height = 100;
+  const data = new Uint8Array(width * height);
+
+  // Outer document boundary at y = 80 from x = 20 to x = 180
+  for (let x = 20; x <= 180; x += 1) {
+    data[80 * width + x] = 255;
+  }
+
+  // Internal printed text line at y = 75 (5px inward towards centroid at y=40)
+  for (let x = 30; x <= 170; x += 2) {
+    data[75 * width + x] = 255;
+  }
+
+  const edgeMap: EdgeMap = { data, width, height };
+  const start: Point = { x: 20, y: 80 };
+  const end: Point = { x: 180, y: 80 };
+  const centroid: Point = { x: 100, y: 40 };
+
+  const samples = sampleNormalDirectedBoundaryPoints(edgeMap, start, end, centroid);
+
+  assert.ok(samples.length > 50, `Expected > 50 samples, got ${samples.length}`);
+  // Every sampled point must be from the outer physical boundary at y=80, NOT the inner text at y=75
+  const onOuterBoundary = samples.filter((p) => Math.abs(p.y - 80) <= 0.5).length;
+  const ratio = onOuterBoundary / samples.length;
+  assert.ok(ratio >= 0.95, `Expected >= 95% samples on outer boundary, got ${(ratio * 100).toFixed(1)}%`);
+});
+
+test("14. P0.3 refineCorners maintains subpixel accuracy with dense text next to border", () => {
+  const width = 640;
+  const height = 480;
+  const data = new Uint8Array(width * height);
+
+  // Document outer perimeter at (100, 100) -> (500, 350)
+  drawEdgeLine(data, width, height, { x: 100, y: 100 }, { x: 500, y: 100 });
+  drawEdgeLine(data, width, height, { x: 500, y: 100 }, { x: 500, y: 350 });
+  drawEdgeLine(data, width, height, { x: 500, y: 350 }, { x: 100, y: 350 });
+  drawEdgeLine(data, width, height, { x: 100, y: 350 }, { x: 100, y: 100 });
+
+  // Add dense printed text line 4px inside the bottom border (y=346 from x=120 to x=480)
+  for (let x = 120; x <= 480; x += 2) {
+    data[346 * width + x] = 255;
+  }
+
+  // Add MRZ line 5px inside the right border (x=495 from y=120 to y=330)
+  for (let y = 120; y <= 330; y += 2) {
+    data[y * width + 495] = 255;
+  }
+
+  const edgeMap: EdgeMap = { data, width, height };
+
+  const candidateCorners: DocumentCorners = [
+    { x: 102, y: 102 },
+    { x: 498, y: 99 },
+    { x: 502, y: 349 },
+    { x: 99, y: 351 },
+  ];
+
+  const refined = refineCorners(
+    mockCv,
+    candidateCorners,
+    edgeMap,
+    width,
+    height,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+
+  // Corners must remain aligned to the outer document boundary (100, 100)-(500, 350), error <= 0.6px
+  assert.ok(Math.abs(refined[0].x - 100) <= 0.6, `TL x: ${refined[0].x}`);
+  assert.ok(Math.abs(refined[0].y - 100) <= 0.6, `TL y: ${refined[0].y}`);
+  assert.ok(Math.abs(refined[1].x - 500) <= 0.6, `TR x: ${refined[1].x}`);
+  assert.ok(Math.abs(refined[1].y - 100) <= 0.6, `TR y: ${refined[1].y}`);
+  assert.ok(Math.abs(refined[2].x - 500) <= 0.6, `BR x: ${refined[2].x}`);
+  assert.ok(Math.abs(refined[2].y - 350) <= 0.6, `BR y: ${refined[2].y}`);
+  assert.ok(Math.abs(refined[3].x - 100) <= 0.6, `BL x: ${refined[3].x}`);
+  assert.ok(Math.abs(refined[3].y - 350) <= 0.6, `BL y: ${refined[3].y}`);
+});
+
+test("15. P0.3 handles degenerate geometry, NaN, and poor edge fallback gracefully", () => {
+  const width = 640;
+  const height = 480;
+  const emptyEdgeMap: EdgeMap = { data: new Uint8Array(width * height), width, height };
+
+  const initialCorners: DocumentCorners = [
+    { x: 100, y: 100 },
+    { x: 500, y: 100 },
+    { x: 500, y: 350 },
+    { x: 100, y: 350 },
+  ];
+
+  // Completely empty edge map: must safely return initial corners unchanged
+  const refinedEmpty = refineCorners(
+    mockCv,
+    initialCorners,
+    emptyEdgeMap,
+    width,
+    height,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+  assert.deepEqual(refinedEmpty, initialCorners);
+
+  // fitLineHuber with empty points
+  assert.equal(fitLineHuber([], { x: 1, y: 0 }), null);
+  // fitLineHuber with single point
+  assert.equal(fitLineHuber([{ x: 10, y: 10 }], { x: 1, y: 0 }), null);
+});
+
 

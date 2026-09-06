@@ -122,6 +122,179 @@ export function fitLinePCA(
 }
 
 /**
+ * Fits a line to 2D points using an M-estimator with Huber loss (iteratively reweighted least squares).
+ * Downweights outliers (such as nearby text or MRZ characters) so they cannot pull the physical
+ * document boundary inward.
+ */
+export function fitLineHuber(
+  points: readonly Point[],
+  referenceDir: Point,
+  delta = 1.25,
+  maxIterations = 4,
+): Line | null {
+  if (points.length < 2) {
+    return null;
+  }
+
+  // Initial line estimate from standard PCA
+  let currentLine = fitLinePCA(points, referenceDir);
+  if (!currentLine) {
+    return null;
+  }
+
+  for (let iter = 0; iter < maxIterations; iter += 1) {
+    let sumW = 0;
+    let sumWX = 0;
+    let sumWY = 0;
+
+    const weights: number[] = new Array(points.length);
+
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      // Perpendicular residual to current line
+      const r = Math.abs((p.x - currentLine.x0) * (-currentLine.vy) + (p.y - currentLine.y0) * currentLine.vx);
+
+      let w = 1.0;
+      if (r > delta) {
+        w = delta / r;
+      }
+      if (r > 2.5 * delta) {
+        w *= 0.05; // Hard attenuation for distant outliers (e.g. internal text/MRZ)
+      }
+
+      weights[i] = w;
+      sumW += w;
+      sumWX += w * p.x;
+      sumWY += w * p.y;
+    }
+
+    if (sumW < 1e-6) {
+      break;
+    }
+
+    const x0 = sumWX / sumW;
+    const y0 = sumWY / sumW;
+
+    let cxx = 0;
+    let cyy = 0;
+    let cxy = 0;
+
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      const w = weights[i];
+      const dx = p.x - x0;
+      const dy = p.y - y0;
+      cxx += w * dx * dx;
+      cyy += w * dy * dy;
+      cxy += w * dx * dy;
+    }
+
+    const theta = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
+    let vx = Math.cos(theta);
+    let vy = Math.sin(theta);
+
+    if (!Number.isFinite(vx) || !Number.isFinite(vy) || Math.hypot(vx, vy) < 1e-9) {
+      break;
+    }
+
+    if (vx * referenceDir.x + vy * referenceDir.y < 0) {
+      vx = -vx;
+      vy = -vy;
+    }
+
+    currentLine = { vx, vy, x0, y0 };
+  }
+
+  return currentLine;
+}
+
+/**
+ * Samples the outermost coherent edge boundary points along normal profiles across
+ * the corridor. For each longitudinal position along the side, evaluates edge evidence
+ * along the outward normal, prioritizing the outermost physical boundary over
+ * inward-lying features such as text, MRZ characters, and internal photos.
+ */
+export function sampleNormalDirectedBoundaryPoints(
+  edgeMap: EdgeMap,
+  start: Point,
+  end: Point,
+  centroid: Point,
+  config: CornerRefinementConfig = DEFAULT_CORNER_REFINEMENT_CONFIG,
+): Point[] {
+  const sideLength = distance(start, end);
+  if (sideLength < 1) {
+    return [];
+  }
+
+  const u: Point = {
+    x: (end.x - start.x) / sideLength,
+    y: (end.y - start.y) / sideLength,
+  };
+  const mid: Point = {
+    x: (start.x + end.x) / 2,
+    y: (start.y + end.y) / 2,
+  };
+
+  // Compute outward normal pointing away from document centroid
+  const n0: Point = { x: -u.y, y: u.x };
+  const outwardDir: Point = { x: mid.x - centroid.x, y: mid.y - centroid.y };
+  const dot = n0.x * outwardDir.x + n0.y * outwardDir.y;
+  const n: Point = dot < 0 ? { x: -n0.x, y: -n0.y } : n0;
+
+  const margin = Math.max(4, Math.min(16, 0.08 * sideLength));
+  const corridorWidth = config.corridorWidthPx;
+
+  // Group pixels by longitudinal position t (rounded to integer pixels)
+  const samplesByT = new Map<number, { point: Point; s: number }[]>();
+
+  const minX = Math.max(0, Math.floor(Math.min(start.x, end.x) - corridorWidth - 1));
+  const maxX = Math.min(edgeMap.width - 1, Math.ceil(Math.max(start.x, end.x) + corridorWidth + 1));
+  const minY = Math.max(0, Math.floor(Math.min(start.y, end.y) - corridorWidth - 1));
+  const maxY = Math.min(edgeMap.height - 1, Math.ceil(Math.max(start.y, end.y) + corridorWidth + 1));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (edgeMap.data[y * edgeMap.width + x] === 0) {
+        continue;
+      }
+
+      const t = (x - start.x) * u.x + (y - start.y) * u.y;
+      if (t < margin || t > sideLength - margin) {
+        continue;
+      }
+
+      const s = (x - mid.x) * n.x + (y - mid.y) * n.y;
+      if (Math.abs(s) <= corridorWidth) {
+        const binT = Math.round(t);
+        const list = samplesByT.get(binT);
+        if (list) {
+          list.push({ point: { x, y }, s });
+        } else {
+          samplesByT.set(binT, [{ point: { x, y }, s }]);
+        }
+      }
+    }
+  }
+
+  // At each longitudinal slice, select the outermost edge pixel (highest s)
+  // This discards inward pixels representing text lines, MRZ, or internal chips.
+  const outermostPoints: Point[] = [];
+  for (const list of samplesByT.values()) {
+    let maxS = -Infinity;
+    let bestPoint = list[0].point;
+    for (const item of list) {
+      if (item.s > maxS) {
+        maxS = item.s;
+        bestPoint = item.point;
+      }
+    }
+    outermostPoints.push(bestPoint);
+  }
+
+  return outermostPoints;
+}
+
+/**
  * Searches for and fits the true physical boundary line along a predicted quad side.
  *
  * In real documents (especially cards with rounded corners or internal features like
@@ -195,7 +368,16 @@ export function findPhysicalBoundaryLine(
   // Generate candidate lines:
   const candidateLines: Line[] = [];
 
-  // 1. Parallel offset lines along normal
+  // 1. Normal-directed outermost boundary line (P0.3)
+  const normalPoints = sampleNormalDirectedBoundaryPoints(edgeMap, start, end, centroid, config);
+  if (normalPoints.length >= config.minEdgePixels) {
+    const normalLine = fitLineHuber(normalPoints, u) ?? fitLinePCA(normalPoints, u);
+    if (normalLine && Math.abs(normalLine.vx * u.x + normalLine.vy * u.y) >= 0.965) {
+      candidateLines.push(normalLine);
+    }
+  }
+
+  // 2. Parallel offset lines along normal
   for (let offset = -corridorWidth; offset <= corridorWidth; offset += 1.0) {
     candidateLines.push({
       vx: u.x,
@@ -205,7 +387,7 @@ export function findPhysicalBoundaryLine(
     });
   }
 
-  // 2. Deterministic point-pair sample lines
+  // 3. Deterministic point-pair sample lines
   const minPairDist = Math.max(15, 0.20 * sideLength);
   const nPixels = pixels.length;
   const maxPairs = 60;
@@ -285,7 +467,7 @@ export function findPhysicalBoundaryLine(
   }
 
   if (bestScore >= 0.30 && bestInliers.length >= config.minEdgePixels) {
-    const fitted = fitLinePCA(bestInliers, u);
+    const fitted = fitLineHuber(bestInliers, u) ?? fitLinePCA(bestInliers, u);
     if (fitted) {
       return fitted;
     }

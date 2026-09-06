@@ -4,7 +4,10 @@ import {
   DEFAULT_CONTAINMENT_TOLERANCE_PX,
   calculateBoundingBoxIoU,
   cornersBoundingBox,
+  distance,
   isContainedWithin,
+  isConvexQuadrilateral,
+  orderCorners,
   polygonArea,
   validateQuadrilateral,
   type DocumentCorners,
@@ -57,12 +60,15 @@ export interface DocumentDetectorConfig
   readonly standardEvidence: CandidateEvidenceConfig;
   readonly reconstructionEvidence: CandidateEvidenceConfig;
   readonly cornerRefinement: CornerRefinementConfig;
+  readonly coarseBlurKernelSize?: number;
   readonly minContainmentAreaRatio: number;
   readonly containmentTolerancePx: number;
 }
 
 export type DocumentCandidateStrategy =
   | "standard-edge-contour"
+  | "adaptive-edge-contour"
+  | "open-spread-hypothesis"
   | "weak-edge-contour"
   | "weak-edge-reconstruction";
 
@@ -87,6 +93,7 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   fallbackCannyLowThreshold: 12,
   fallbackCannyHighThreshold: 55,
   fallbackMorphologyKernelSize: 5,
+  coarseBlurKernelSize: 9,
   polygonApproximationRatios: [0.015, 0.02, 0.03],
   minAreaRatio: 0.02,
   maxAreaRatio: 0.96,
@@ -248,6 +255,49 @@ function createScoredCandidate(
   };
 }
 
+export interface AdaptiveThresholds {
+  readonly cannyLow: number;
+  readonly cannyHigh: number;
+  readonly macroCutoff: number;
+}
+
+/**
+ * Derives adaptive Canny thresholds and macro boundary cutoff from the Otsu
+ * threshold computed on the morphological gradient of the coarse-blurred frame.
+ *
+ * This provides contrast-adaptive edge sensitivity:
+ * - Low-contrast scenes: thresholds scale down gracefully (safe minimums 15/35)
+ * - Textured / high-contrast scenes: thresholds elevate to suppress clutter
+ */
+export function computeAdaptiveEdgeThresholds(
+  gradOtsu: number,
+): AdaptiveThresholds {
+  const safeOtsu = Math.max(10, Math.min(120, Number.isFinite(gradOtsu) ? gradOtsu : 30));
+  const cannyHigh = Math.max(35, Math.min(120, Math.round(safeOtsu * 1.25)));
+  const cannyLow = Math.max(15, Math.round(cannyHigh * 0.40));
+  const macroCutoff = Math.max(8, Math.round(safeOtsu * 0.45));
+  return { cannyLow, cannyHigh, macroCutoff };
+}
+
+/**
+ * Checks whether a candidate represents a confident, full-sized document with strong
+ * boundary support on all sides, justifying immediate acceptance without running
+ * multi-scale edge fusion.
+ */
+export function isStrongDocumentWinner(
+  winner: ScoredDocumentCandidate | null,
+): boolean {
+  if (!winner) {
+    return false;
+  }
+  return (
+    winner.detection.areaRatio >= 0.18 &&
+    winner.detection.confidence >= 0.65 &&
+    winner.boundaryEvidence.weakestSideSupport >= 0.25 &&
+    winner.boundaryEvidence.averageSupport >= 0.45
+  );
+}
+
 /**
  * Selects the best candidate from a set using containment-aware reasoning.
  *
@@ -392,12 +442,247 @@ export function selectBestCandidate(
   );
 }
 
+/**
+ * Detects pairs of adjacent page-like candidates that plausibly form one physical
+ * open-book or open-passport spread, constructing an enclosing spread quadrilateral.
+ *
+ * Requirements (P0.2):
+ * - Detect pairs of adjacent page-like quadrilaterals that plausibly form one physical spread
+ * - Similar vertical extent, adjacent relationship, compatible scale
+ * - Shared central spine with close proximity
+ * - Approximately collinear top and bottom outer boundaries
+ * - Non-overlapping adjacent pages (IoU <= 0.18)
+ * - Resulting spread represents the OUTER PHYSICAL BOUNDARY (omitting center fold)
+ * - Evaluated against balanced boundary evidence on the outer edges
+ * - Strong rejection rules against unrelated documents, cards, barcodes, MRZ, photos
+ */
+export function generateSpreadCandidates(
+  candidates: readonly ScoredDocumentCandidate[],
+  edgeMap: EdgeMap,
+  frameWidth: number,
+  frameHeight: number,
+  config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+): readonly ScoredDocumentCandidate[] {
+  if (candidates.length < 2) {
+    return [];
+  }
+
+  const spreadCandidates: ScoredDocumentCandidate[] = [];
+
+  // Filter out candidates that cannot plausibly be a page of an open document spread
+  // (e.g. tiny barcodes, thin MRZ strips, or full-frame enclosing documents)
+  const pageCandidates = candidates.filter((c) => {
+    // Area ratio of a single page in an open spread is typically between 0.08 and 0.60
+    if (c.detection.areaRatio < 0.08 || c.detection.areaRatio > 0.60) {
+      return false;
+    }
+    // Single page aspect ratio (ISO B7 passport page: 125x88mm => 1.42; allowed range [1.15, 1.90])
+    const corners = c.detection.corners;
+    const w = (distance(corners[0], corners[1]) + distance(corners[3], corners[2])) / 2;
+    const h = (distance(corners[0], corners[3]) + distance(corners[1], corners[2])) / 2;
+    if (w <= 0 || h <= 0) return false;
+    const ratio = Math.max(w, h) / Math.min(w, h);
+    return ratio >= 1.15 && ratio <= 1.90;
+  });
+
+  for (let i = 0; i < pageCandidates.length; i += 1) {
+    const candA = pageCandidates[i];
+    for (let j = i + 1; j < pageCandidates.length; j += 1) {
+      const candB = pageCandidates[j];
+
+      // 1. Scale compatibility: area ratio between 0.55 and 1.80
+      const areaA = candA.detection.areaRatio;
+      const areaB = candB.detection.areaRatio;
+      const areaRatio = Math.min(areaA, areaB) / Math.max(areaA, areaB);
+      if (areaRatio < 0.55) {
+        continue;
+      }
+
+      // 2. Bounding box IoU must be small (adjacent, not overlapping)
+      const boxA = cornersBoundingBox(candA.detection.corners);
+      const boxB = cornersBoundingBox(candB.detection.corners);
+      const iou = calculateBoundingBoxIoU(boxA, boxB);
+      if (iou > 0.18) {
+        continue;
+      }
+
+      // 3. Determine adjacency orientation (horizontal or vertical)
+      const centerA = {
+        x: (candA.detection.corners[0].x + candA.detection.corners[2].x) / 2,
+        y: (candA.detection.corners[0].y + candA.detection.corners[2].y) / 2,
+      };
+      const centerB = {
+        x: (candB.detection.corners[0].x + candB.detection.corners[2].x) / 2,
+        y: (candB.detection.corners[0].y + candB.detection.corners[2].y) / 2,
+      };
+
+      const dx = centerB.x - centerA.x;
+      const dy = centerB.y - centerA.y;
+
+      let mergedCorners: DocumentCorners | null = null;
+
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        // Horizontal adjacency: left page and right page
+        const left = dx > 0 ? candA.detection.corners : candB.detection.corners;
+        const right = dx > 0 ? candB.detection.corners : candA.detection.corners;
+
+        // Spine edges: left right-edge (left[1] -> left[2]) and right left-edge (right[0] -> right[3])
+        const spineHeightLeft = distance(left[1], left[2]);
+        const spineHeightRight = distance(right[0], right[3]);
+        if (Math.min(spineHeightLeft, spineHeightRight) / Math.max(spineHeightLeft, spineHeightRight) < 0.75) {
+          continue;
+        }
+
+        const pageWidth = (distance(left[0], left[1]) + distance(right[0], right[1])) / 2;
+        const maxSpineGap = Math.max(18, 0.14 * pageWidth);
+
+        // Gap at spine top and bottom
+        const topGap = distance(left[1], right[0]);
+        const botGap = distance(left[2], right[3]);
+        if (topGap > maxSpineGap || botGap > maxSpineGap) {
+          continue;
+        }
+
+        // Top corners Y alignment and bottom corners Y alignment
+        const meanSpineH = (spineHeightLeft + spineHeightRight) / 2;
+        if (Math.abs(left[1].y - right[0].y) > Math.max(14, 0.12 * meanSpineH)) {
+          continue;
+        }
+        if (Math.abs(left[2].y - right[3].y) > Math.max(14, 0.12 * meanSpineH)) {
+          continue;
+        }
+
+        // Top edges collinearity
+        const dTopL = distance(left[0], left[1]);
+        const dTopR = distance(right[0], right[1]);
+        if (dTopL < 1 || dTopR < 1) continue;
+        const uTopL = { x: (left[1].x - left[0].x) / dTopL, y: (left[1].y - left[0].y) / dTopL };
+        const uTopR = { x: (right[1].x - right[0].x) / dTopR, y: (right[1].y - right[0].y) / dTopR };
+        if (uTopL.x * uTopR.x + uTopL.y * uTopR.y < 0.90) {
+          continue;
+        }
+
+        // Bottom edges collinearity
+        const dBotL = distance(left[3], left[2]);
+        const dBotR = distance(right[3], right[2]);
+        if (dBotL < 1 || dBotR < 1) continue;
+        const uBotL = { x: (left[2].x - left[3].x) / dBotL, y: (left[2].y - left[3].y) / dBotL };
+        const uBotR = { x: (right[2].x - right[3].x) / dBotR, y: (right[2].y - right[3].y) / dBotR };
+        if (uBotL.x * uBotR.x + uBotL.y * uBotR.y < 0.90) {
+          continue;
+        }
+
+        // Construct outer spread quadrilateral
+        mergedCorners = orderCorners([left[0], right[1], right[2], left[3]]);
+      } else {
+        // Vertical adjacency: top page and bottom page
+        const top = dy > 0 ? candA.detection.corners : candB.detection.corners;
+        const bottom = dy > 0 ? candB.detection.corners : candA.detection.corners;
+
+        // Spine edges: top bottom-edge (top[3] -> top[2]) and bottom top-edge (bottom[0] -> bottom[1])
+        const spineWidthTop = distance(top[3], top[2]);
+        const spineWidthBot = distance(bottom[0], bottom[1]);
+        if (Math.min(spineWidthTop, spineWidthBot) / Math.max(spineWidthTop, spineWidthBot) < 0.75) {
+          continue;
+        }
+
+        const pageHeight = (distance(top[0], top[3]) + distance(bottom[0], bottom[3])) / 2;
+        const maxSpineGap = Math.max(18, 0.14 * pageHeight);
+
+        const leftGap = distance(top[3], bottom[0]);
+        const rightGap = distance(top[2], bottom[1]);
+        if (leftGap > maxSpineGap || rightGap > maxSpineGap) {
+          continue;
+        }
+
+        const meanSpineW = (spineWidthTop + spineWidthBot) / 2;
+        if (Math.abs(top[3].x - bottom[0].x) > Math.max(14, 0.12 * meanSpineW)) {
+          continue;
+        }
+        if (Math.abs(top[2].x - bottom[1].x) > Math.max(14, 0.12 * meanSpineW)) {
+          continue;
+        }
+
+        // Left edges collinearity
+        const dLeftT = distance(top[0], top[3]);
+        const dLeftB = distance(bottom[0], bottom[3]);
+        if (dLeftT < 1 || dLeftB < 1) continue;
+        const uLeftT = { x: (top[3].x - top[0].x) / dLeftT, y: (top[3].y - top[0].y) / dLeftT };
+        const uLeftB = { x: (bottom[3].x - bottom[0].x) / dLeftB, y: (bottom[3].y - bottom[0].y) / dLeftB };
+        if (uLeftT.x * uLeftB.x + uLeftT.y * uLeftB.y < 0.90) {
+          continue;
+        }
+
+        // Right edges collinearity
+        const dRightT = distance(top[1], top[2]);
+        const dRightB = distance(bottom[1], bottom[2]);
+        if (dRightT < 1 || dRightB < 1) continue;
+        const uRightT = { x: (top[2].x - top[1].x) / dRightT, y: (top[2].y - top[1].y) / dRightT };
+        const uRightB = { x: (bottom[2].x - bottom[1].x) / dRightB, y: (bottom[2].y - bottom[1].y) / dRightB };
+        if (uRightT.x * uRightB.x + uRightT.y * uRightB.y < 0.90) {
+          continue;
+        }
+
+        // Construct outer spread quadrilateral
+        mergedCorners = orderCorners([top[0], top[1], bottom[2], bottom[3]]);
+      }
+
+      if (!mergedCorners || !isConvexQuadrilateral(mergedCorners)) {
+        continue;
+      }
+
+      // Check spread aspect ratio (typical open passport B6 is 176x125mm => 1.41)
+      const sw = (distance(mergedCorners[0], mergedCorners[1]) + distance(mergedCorners[3], mergedCorners[2])) / 2;
+      const sh = (distance(mergedCorners[0], mergedCorners[3]) + distance(mergedCorners[1], mergedCorners[2])) / 2;
+      if (sw <= 0 || sh <= 0) continue;
+      const spreadAspect = Math.max(sw, sh) / Math.min(sw, sh);
+      if (spreadAspect < 1.05 || spreadAspect > 2.20) {
+        continue;
+      }
+
+      // Validate merged quadrilateral
+      const validated = validateQuadrilateral(
+        mergedCorners,
+        frameWidth,
+        frameHeight,
+        config,
+      );
+      if (!validated) {
+        continue;
+      }
+
+      // Measure boundary evidence along the outer physical perimeter of the spread
+      const evidence = calculateCandidateBoundaryEvidence(
+        edgeMap,
+        validated.corners,
+        config.standardEvidence,
+      );
+
+      // Must have balanced boundary evidence on all outer edges
+      if (!hasBalancedBoundaryEvidence(evidence, config.standardEvidence)) {
+        continue;
+      }
+
+      const spreadCandidate = createScoredCandidate(
+        validated,
+        evidence,
+        "open-spread-hypothesis",
+        config,
+      );
+
+      spreadCandidates.push(spreadCandidate);
+    }
+  }
+
+  return spreadCandidates;
+}
+
 function findContourCandidates(
   cv: typeof OpenCV,
   edges: OpenCV.Mat,
   frame: AnalysisFrame,
   config: DocumentDetectorConfig,
-  strategy: Exclude<DocumentCandidateStrategy, "weak-edge-reconstruction">,
+  strategy: Exclude<DocumentCandidateStrategy, "weak-edge-reconstruction" | "open-spread-hypothesis">,
   allowReconstruction: boolean,
 ): ContourSearchResult {
   const contours = new cv.MatVector();
@@ -654,10 +939,18 @@ export function runDocumentDetection(
   );
 
   let claheResult: OpenCV.Mat | null = null;
+  let coarseBlurred: OpenCV.Mat | null = null;
+  let coarseGrad: OpenCV.Mat | null = null;
+  let coarseGradMask: OpenCV.Mat | null = null;
+  let adaptiveEdges: OpenCV.Mat | null = null;
+  let fusedEdges: OpenCV.Mat | null = null;
+  let otsuDummy: OpenCV.Mat | null = null;
 
   try {
     cv.cvtColor(source, grayscale, cv.COLOR_RGBA2GRAY);
     claheResult = preprocessFrame(cv, grayscale, blurred, config);
+
+    // Pass 1: Standard fixed-threshold Canny (30 / 100)
     cv.Canny(
       blurred,
       edges,
@@ -683,32 +976,193 @@ export function runDocumentDetection(
       false,
     );
 
+    const standardEdgeMap: EdgeMap = {
+      data: edges.data,
+      width: frame.width,
+      height: frame.height,
+    };
+
+    const standardSpreads =
+      standardResult.candidates.length >= 2
+        ? generateSpreadCandidates(
+            standardResult.candidates,
+            standardEdgeMap,
+            frame.width,
+            frame.height,
+            config,
+          )
+        : [];
+
+    const standardPool = [...standardResult.candidates, ...standardSpreads];
+    let totalContourCount = standardResult.contourCount;
+    let totalQuadrilateralCount =
+      standardResult.quadrilateralCount + standardSpreads.length;
+
     const standardWinner = selectBestCandidate(
-      standardResult.candidates,
+      standardPool,
       config,
       previousCorners,
     );
 
-    if (standardWinner) {
-      const edgeMap: EdgeMap = {
-        data: edges.data,
-        width: frame.width,
-        height: frame.height,
-      };
+    // Fast-path: When standard Canny produces a decisive, high-confidence document
+    // detection with strong 4-sided support, return it immediately.
+    if (isStrongDocumentWinner(standardWinner)) {
       return {
         detection: refineDetection(
           cv,
-          standardWinner.detection,
-          edgeMap,
+          standardWinner!.detection,
+          standardEdgeMap,
           grayscale,
           config,
         ),
-        contourCount: standardResult.contourCount,
-        quadrilateralCount: standardResult.quadrilateralCount,
-        strategy: standardWinner.strategy,
+        contourCount: totalContourCount,
+        quadrilateralCount: totalQuadrilateralCount,
+        strategy: standardWinner!.strategy,
       };
     }
 
+    // Pass 2: Adaptive & Multi-Scale Edge Fusion (P0.1)
+    // Runs when standard Canny is inconclusive (faint edges, missing side, or internal feature).
+    let adaptiveCandidates: readonly ScoredDocumentCandidate[] = [];
+    const coarseBlurSize = config.coarseBlurKernelSize ?? 9;
+
+    try {
+      coarseBlurred = new cv.Mat();
+      cv.GaussianBlur(
+        blurred,
+        coarseBlurred,
+        new cv.Size(coarseBlurSize, coarseBlurSize),
+        0,
+        0,
+        cv.BORDER_DEFAULT,
+      );
+
+      coarseGrad = new cv.Mat();
+      cv.morphologyEx(
+        coarseBlurred,
+        coarseGrad,
+        cv.MORPH_GRADIENT,
+        standardKernel,
+      );
+
+      otsuDummy = new cv.Mat();
+      const rawOtsu = cv.threshold(
+        coarseGrad,
+        otsuDummy,
+        0,
+        255,
+        cv.THRESH_BINARY | cv.THRESH_OTSU,
+      );
+      const thresholds = computeAdaptiveEdgeThresholds(rawOtsu as number);
+
+      adaptiveEdges = new cv.Mat();
+      cv.Canny(
+        blurred,
+        adaptiveEdges,
+        thresholds.cannyLow,
+        thresholds.cannyHigh,
+        3,
+        true,
+      );
+
+      // Reconnect fragmented boundaries via morphological closing
+      cv.morphologyEx(
+        adaptiveEdges,
+        adaptiveEdges,
+        cv.MORPH_CLOSE,
+        fallbackKernel,
+        new cv.Point(-1, -1),
+        1,
+      );
+
+      // Macro-scale gradient mask suppresses high-frequency wood grain and text lines
+      coarseGradMask = new cv.Mat();
+      cv.threshold(
+        coarseGrad,
+        coarseGradMask,
+        thresholds.macroCutoff,
+        255,
+        cv.THRESH_BINARY,
+      );
+
+      // Multi-scale evidence fusion: keep closed Canny edges confirmed by macro boundary gradient
+      fusedEdges = new cv.Mat();
+      cv.bitwise_and(adaptiveEdges, coarseGradMask, fusedEdges);
+      cv.morphologyEx(
+        fusedEdges,
+        fusedEdges,
+        cv.MORPH_CLOSE,
+        standardKernel,
+        new cv.Point(-1, -1),
+        1,
+      );
+
+      const adaptiveResult = findContourCandidates(
+        cv,
+        fusedEdges,
+        frame,
+        config,
+        "adaptive-edge-contour",
+        false,
+      );
+
+      totalContourCount += adaptiveResult.contourCount;
+      totalQuadrilateralCount += adaptiveResult.quadrilateralCount;
+      adaptiveCandidates = adaptiveResult.candidates;
+    } catch {
+      // In case adaptive/multi-scale operations encounter unsupported WASM calls,
+      // gracefully fall through to standard/fallback candidates.
+    }
+
+    // Pool candidates from standard and adaptive passes
+    const pooledCandidates = [
+      ...standardResult.candidates,
+      ...adaptiveCandidates,
+    ];
+
+    const winningEdgeData = fusedEdges ? fusedEdges.data : edges.data;
+    const currentEdgeMap: EdgeMap = {
+      data: winningEdgeData,
+      width: frame.width,
+      height: frame.height,
+    };
+
+    const spreadCandidates =
+      pooledCandidates.length >= 2
+        ? generateSpreadCandidates(
+            pooledCandidates,
+            currentEdgeMap,
+            frame.width,
+            frame.height,
+            config,
+          )
+        : [];
+
+    totalQuadrilateralCount += spreadCandidates.length;
+    const allCandidates = [...pooledCandidates, ...spreadCandidates];
+
+    const pooledWinner = selectBestCandidate(
+      allCandidates,
+      config,
+      previousCorners,
+    );
+
+    if (pooledWinner) {
+      return {
+        detection: refineDetection(
+          cv,
+          pooledWinner.detection,
+          currentEdgeMap,
+          grayscale,
+          config,
+        ),
+        contourCount: totalContourCount,
+        quadrilateralCount: totalQuadrilateralCount,
+        strategy: pooledWinner.strategy,
+      };
+    }
+
+    // Pass 3: Fallback weak reconstruction (minAreaRect for rounded/clipped contours)
     cv.Canny(
       blurred,
       edges,
@@ -734,6 +1188,9 @@ export function runDocumentDetection(
       true,
     );
 
+    totalContourCount += fallbackResult.contourCount;
+    totalQuadrilateralCount += fallbackResult.quadrilateralCount;
+
     const fallbackWinner = selectBestCandidate(
       fallbackResult.candidates,
       config,
@@ -752,13 +1209,18 @@ export function runDocumentDetection(
 
     return {
       detection: refinedFallback,
-      contourCount: standardResult.contourCount + fallbackResult.contourCount,
-      quadrilateralCount:
-        standardResult.quadrilateralCount + fallbackResult.quadrilateralCount,
+      contourCount: totalContourCount,
+      quadrilateralCount: totalQuadrilateralCount,
       strategy: fallbackWinner?.strategy ?? null,
     };
   } finally {
     claheResult?.delete();
+    otsuDummy?.delete();
+    fusedEdges?.delete();
+    adaptiveEdges?.delete();
+    coarseGradMask?.delete();
+    coarseGrad?.delete();
+    coarseBlurred?.delete();
     fallbackKernel.delete();
     standardKernel.delete();
     edges.delete();
