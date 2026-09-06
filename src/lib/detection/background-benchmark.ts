@@ -15,6 +15,7 @@ import type { AnalysisFrame } from "../camera/frame-sampler.ts";
 export type BenchmarkBackground =
   | "pure-black"
   | "white-light-table"
+  | "white-pure-low-contrast"
   | "beige"
   | "light-wood-grain"
   | "dark-wood"
@@ -72,6 +73,7 @@ export interface BenchmarkSuiteReport {
 export const BENCHMARK_BACKGROUNDS: readonly BenchmarkBackground[] = [
   "pure-black",
   "white-light-table",
+  "white-pure-low-contrast",
   "beige",
   "light-wood-grain",
   "dark-wood",
@@ -138,6 +140,8 @@ function getBackgroundPixel(
       return [15, 15, 15];
     case "white-light-table":
       return [215, 215, 215];
+    case "white-pure-low-contrast":
+      return [248, 248, 248];
     case "beige":
       return [205, 195, 175];
     case "light-wood-grain": {
@@ -431,7 +435,7 @@ function getDocumentSpec(
       ]);
       return {
         corners,
-        substrateColor: [246, 246, 246],
+        substrateColor: [242, 242, 244],
         renderContent: (data, stride) => {
           // Store header
           for (let y = y0 + 25; y < y0 + 38; y += 1) {
@@ -668,6 +672,7 @@ export function runBenchmarkSuite(cv: typeof OpenCV): BenchmarkSuiteReport {
   const recallByBackground: Record<BenchmarkBackground, number> = {
     "pure-black": 0,
     "white-light-table": 0,
+    "white-pure-low-contrast": 0,
     beige: 0,
     "light-wood-grain": 0,
     "dark-wood": 0,
@@ -691,6 +696,7 @@ export function runBenchmarkSuite(cv: typeof OpenCV): BenchmarkSuiteReport {
   const falsePositivesByBackground: Record<BenchmarkBackground, number> = {
     "pure-black": 0,
     "white-light-table": 0,
+    "white-pure-low-contrast": 0,
     beige: 0,
     "light-wood-grain": 0,
     "dark-wood": 0,

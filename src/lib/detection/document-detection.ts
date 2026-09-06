@@ -71,7 +71,8 @@ export type DocumentCandidateStrategy =
   | "adaptive-edge-contour"
   | "open-spread-hypothesis"
   | "weak-edge-contour"
-  | "weak-edge-reconstruction";
+  | "weak-edge-reconstruction"
+  | "low-contrast-evidence-fusion";
 
 export interface DocumentDetectionRun {
   readonly detection: DocumentDetection | null;
@@ -1253,11 +1254,160 @@ export function runDocumentDetection(
       config,
       previousCorners,
     );
-    const fallbackDetection = fallbackWinner?.detection ?? null;
-    const refinedFallback = fallbackDetection
+
+    let finalWinner = fallbackWinner;
+
+    // Pass 4: Low-Contrast Evidence-Fused Document Recovery (P0.5)
+    // Executes ONLY when Passes 1–3 fail to find any full-sized document candidate (area >= 0.10).
+    // Specifically recovers white paper on white desks, light wood, pale counters, or certificates
+    // where physical edge gradient is subtle (3–10) and rejected by Canny's higher thresholds.
+    let pass4Winner: ScoredDocumentCandidate | null = null;
+    if (!finalWinner || finalWinner.detection.areaRatio < 0.10) {
+      let pass4Denoised: OpenCV.Mat | null = null;
+      let pass4Grad: OpenCV.Mat | null = null;
+      let pass4Binary: OpenCV.Mat | null = null;
+      let pass4Closed: OpenCV.Mat | null = null;
+      let pass4Contours: OpenCV.MatVector | null = null;
+      let pass4Hierarchy: OpenCV.Mat | null = null;
+      let pass4CloseKernel: OpenCV.Mat | null = null;
+
+      try {
+        pass4Denoised = new cv.Mat();
+        cv.medianBlur(grayscale, pass4Denoised, 3);
+
+        pass4Grad = new cv.Mat();
+        cv.morphologyEx(pass4Denoised, pass4Grad, cv.MORPH_GRADIENT, standardKernel);
+
+        pass4Binary = new cv.Mat();
+        cv.threshold(pass4Grad, pass4Binary, 2, 255, cv.THRESH_BINARY);
+
+        pass4CloseKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 9));
+        pass4Closed = new cv.Mat();
+        cv.morphologyEx(pass4Binary, pass4Closed, cv.MORPH_CLOSE, pass4CloseKernel);
+
+        pass4Contours = new cv.MatVector();
+        pass4Hierarchy = new cv.Mat();
+        cv.findContours(
+          pass4Closed,
+          pass4Contours,
+          pass4Hierarchy,
+          cv.RETR_EXTERNAL,
+          cv.CHAIN_APPROX_SIMPLE,
+        );
+
+        totalContourCount += pass4Contours.size();
+        const pass4EdgeMap: EdgeMap = {
+          data: pass4Closed.data,
+          width: frame.width,
+          height: frame.height,
+        };
+
+        const pass4Candidates: ScoredDocumentCandidate[] = [];
+
+        for (let i = 0; i < pass4Contours.size(); i++) {
+          const contour = pass4Contours.get(i);
+          const approx = new cv.Mat();
+
+          try {
+            const contourArea = Math.abs(cv.contourArea(contour));
+            const areaRatio = contourArea / (frame.width * frame.height);
+            if (areaRatio < 0.08 || areaRatio > config.maxAreaRatio) {
+              continue;
+            }
+
+            const peri = cv.arcLength(contour, true);
+            const candidateBoxes: Point[][] = [];
+
+            for (const epsRatio of [0.02, 0.03, 0.04]) {
+              cv.approxPolyDP(contour, approx, peri * epsRatio, true);
+              if (approx.rows === 4 && cv.isContourConvex(approx)) {
+                candidateBoxes.push(readContourPoints(approx));
+              }
+            }
+
+            const box = cv.boxPoints(cv.minAreaRect(contour)).map((p) => ({ x: p.x, y: p.y }));
+            candidateBoxes.push(box);
+
+            for (const corners of candidateBoxes) {
+              const quad = validateQuadrilateral(corners, frame.width, frame.height, config);
+              if (!quad) continue;
+
+              // Strict geometry guards for low-contrast candidates:
+              // 1. Must have nearly rectangular corners (angleScore >= 0.65)
+              if (quad.metrics.angleScore < 0.65) continue;
+              // 2. Must have consistent opposite edges (edgeConsistency >= 0.65)
+              if (quad.metrics.edgeConsistency < 0.65) continue;
+
+              // 3. Document aspect ratio check (1.05 to 4.5)
+              const topW = distance(quad.corners[0], quad.corners[1]);
+              const botW = distance(quad.corners[3], quad.corners[2]);
+              const leftH = distance(quad.corners[0], quad.corners[3]);
+              const rightH = distance(quad.corners[1], quad.corners[2]);
+              const avgW = (topW + botW) / 2;
+              const avgH = (leftH + rightH) / 2;
+              if (avgW < 1 || avgH < 1) continue;
+              const ar = Math.max(avgW, avgH) / Math.min(avgW, avgH);
+              if (ar < 1.05 || ar > 4.5) continue;
+
+              // 4. Region contrast evaluation against grayscale
+              const evidence = calculateCandidateBoundaryEvidence(
+                pass4EdgeMap,
+                quad.corners,
+                config.standardEvidence,
+                grayMap,
+              );
+              const rc = evidence.regionContrast;
+              if (!rc || rc.averageStep < 1.5) {
+                // Reject completely flat empty surfaces (table/floor/wall)
+                continue;
+              }
+
+              // 5. Distributed evidence across at least 3 sides
+              let supportedSides = 0;
+              for (let s = 0; s < 4; s++) {
+                if (evidence.sideSupport[s] >= 0.10 || rc.sideContrast[s].stepMagnitude >= 1.5) {
+                  supportedSides++;
+                }
+              }
+              if (supportedSides < 3) continue;
+
+              totalQuadrilateralCount++;
+              pass4Candidates.push(
+                createScoredCandidate(quad, evidence, "low-contrast-evidence-fusion", config),
+              );
+            }
+          } finally {
+            approx.delete();
+            contour.delete();
+          }
+        }
+
+        if (pass4Candidates.length > 0) {
+          // If earlier passes found internal features, let containment solver prefer this enclosing outer document
+          const pass4Pool = finalWinner ? [finalWinner, ...pass4Candidates] : pass4Candidates;
+          pass4Winner = selectBestCandidate(pass4Pool, config, previousCorners);
+          if (pass4Winner && pass4Winner.detection.areaRatio >= 0.10) {
+            finalWinner = pass4Winner;
+          }
+        }
+      } catch {
+        // Fall through gracefully if low-contrast pass encounters an error
+      } finally {
+        pass4CloseKernel?.delete();
+        pass4Hierarchy?.delete();
+        pass4Contours?.delete();
+        pass4Closed?.delete();
+        pass4Binary?.delete();
+        pass4Grad?.delete();
+        pass4Denoised?.delete();
+      }
+    }
+
+    const finalDetection = finalWinner?.detection ?? null;
+    const refinedFinal = finalDetection
       ? refineDetection(
           cv,
-          fallbackDetection,
+          finalDetection,
           { data: edges.data, width: frame.width, height: frame.height },
           grayscale,
           config,
@@ -1265,10 +1415,10 @@ export function runDocumentDetection(
       : null;
 
     return {
-      detection: refinedFallback,
+      detection: refinedFinal,
       contourCount: totalContourCount,
       quadrilateralCount: totalQuadrilateralCount,
-      strategy: fallbackWinner?.strategy ?? null,
+      strategy: finalWinner?.strategy ?? null,
     };
   } finally {
     claheResult?.delete();
