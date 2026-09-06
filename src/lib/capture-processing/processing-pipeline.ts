@@ -24,6 +24,7 @@ export const DEFAULT_JPEG_QUALITY = 0.94;
 export interface CapturedFrame {
   readonly canvas: HTMLCanvasElement;
   readonly sourceDimensions: FrameDimensions;
+  readonly videoDimensions?: FrameDimensions;
 }
 
 export interface ProcessingPipelineOptions {
@@ -120,7 +121,7 @@ export async function processCapturedFrame(
   try {
     const mapping = createFullFrameCoordinateMapping(
       analysisDimensions,
-      capturedFrame.sourceDimensions,
+      capturedFrame.videoDimensions ?? capturedFrame.sourceDimensions,
       getFallbackDimensions(capturedFrame),
     );
     const captureCorners = mapAnalysisCornersToCapture(analysisCorners, mapping);

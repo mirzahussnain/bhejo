@@ -19,8 +19,8 @@ export interface PerspectiveOutputDimensions {
 }
 
 export const DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG: PerspectiveTransformConfig = {
-  maxDimension: 2_400,
-  maxPixels: 6_000_000,
+  maxDimension: 4_096,
+  maxPixels: 16_000_000,
   minimumAreaRatio: 0.002,
 };
 
@@ -50,6 +50,45 @@ export function clampCornersToSourceDimensions(
       y: Math.max(0, Math.min(source.height, corners[3].y)),
     },
   ];
+}
+
+/**
+ * Expands quadrilateral corners outwards from its centroid by a small safety margin (default 1.5%).
+ * Prevents clipping edge borders, stamps, and passport edge threads while keeping background inclusion < 3%.
+ * Clamps strictly within source bounds.
+ */
+export function expandCornersWithSafetyMargin(
+  corners: DocumentCorners,
+  sourceDimensions: PerspectiveOutputDimensions,
+  marginRatio = 0.015,
+): DocumentCorners {
+  if (marginRatio <= 0) {
+    return clampCornersToSourceDimensions(corners, sourceDimensions);
+  }
+
+  const cx = (corners[0].x + corners[1].x + corners[2].x + corners[3].x) / 4;
+  const cy = (corners[0].y + corners[1].y + corners[2].y + corners[3].y) / 4;
+
+  const expanded: DocumentCorners = [
+    {
+      x: cx + (corners[0].x - cx) * (1 + marginRatio),
+      y: cy + (corners[0].y - cy) * (1 + marginRatio),
+    },
+    {
+      x: cx + (corners[1].x - cx) * (1 + marginRatio),
+      y: cy + (corners[1].y - cy) * (1 + marginRatio),
+    },
+    {
+      x: cx + (corners[2].x - cx) * (1 + marginRatio),
+      y: cy + (corners[2].y - cy) * (1 + marginRatio),
+    },
+    {
+      x: cx + (corners[3].x - cx) * (1 + marginRatio),
+      y: cy + (corners[3].y - cy) * (1 + marginRatio),
+    },
+  ];
+
+  return clampCornersToSourceDimensions(expanded, sourceDimensions);
 }
 
 export function isValidPerspectiveQuadrilateral(
@@ -430,6 +469,7 @@ export function warpPerspectiveToCanvas(
   corners: DocumentCorners,
   targetCanvas: HTMLCanvasElement,
   config: PerspectiveTransformConfig = DEFAULT_PERSPECTIVE_TRANSFORM_CONFIG,
+  marginRatio = 0.015,
 ): PerspectiveOutputDimensions {
   const sourceDimensions = {
     width: sourceCanvas.width,
@@ -439,7 +479,11 @@ export function warpPerspectiveToCanvas(
     throw new Error("The document edges are not usable for correction.");
   }
 
-  const safeCorners = clampCornersToSourceDimensions(corners, sourceDimensions);
+  const safeCorners = expandCornersWithSafetyMargin(
+    corners,
+    sourceDimensions,
+    marginRatio,
+  );
   const output = calculatePerspectiveOutputDimensions(safeCorners, config);
   if (!output) {
     throw new Error("The document size is not usable for correction.");
