@@ -12,8 +12,17 @@ import { useCamera } from "@/hooks/useCamera";
 import { useDocumentDetection, type ProcessedDocumentFrame } from "@/hooks/useDocumentDetection";
 import { useDocumentSession } from "@/hooks/useDocumentSession";
 import { useFrameSampler } from "@/hooks/useFrameSampler";
-import { captureVideoFrame } from "@/lib/camera/camera";
+import {
+  captureStillPhoto,
+  captureVideoFrame,
+  type CapturedStillPhoto,
+} from "@/lib/camera/camera";
 import { CaptureController } from "@/lib/capture/capture-controller";
+import {
+  evaluateCaptureQuality,
+  type CaptureQualityEvaluation,
+} from "@/lib/capture/capture-quality";
+import { RecentFrameBuffer } from "@/lib/capture/recent-frame-buffer";
 import { processCapturedFrame } from "@/lib/capture-processing/processing-pipeline";
 import type { DocumentDetection } from "@/lib/detection/document-detection";
 import { analyseDocumentQuality, type DocumentQuality } from "@/lib/quality/document-quality";
@@ -29,7 +38,26 @@ interface LiveAnalysis {
   readonly displayCorners: DocumentDetection["corners"] | null;
 }
 
-interface CurrentCapture {
+export interface CaptureDiagnostics {
+  readonly method: "image-capture" | "video-frame";
+  readonly sourceDimensions: { readonly width: number; readonly height: number };
+  readonly sourceAspectRatio: number;
+  readonly captureLatencyMs: number;
+  readonly processingLatencyMs: number;
+  readonly initialSharpness: number;
+  readonly outputDimensions: { readonly width: number; readonly height: number };
+  readonly jpegSizeBytes: number;
+  readonly retried: boolean;
+  readonly usedFallback: boolean;
+}
+
+declare global {
+  interface Window {
+    __bhejoCaptureDiagnostics?: () => CaptureDiagnostics | null;
+  }
+}
+
+export interface CurrentCapture {
   readonly blob: Blob;
   readonly previewUrl: string;
   readonly correctionFallback: boolean;
@@ -58,7 +86,7 @@ export function CameraScanner({
   onCancel,
   suppressDefaultComplete = false,
 }: CameraScannerProps) {
-  const { status, videoRef, startCamera, stopCamera } = useCamera();
+  const { status, videoRef, startCamera, stopCamera, getMediaStream } = useCamera();
   const session = useDocumentSession();
 
   const [uiMode, setUiMode] = useState<ScannerUIMode>("camera");
@@ -75,6 +103,16 @@ export function CameraScanner({
   const captureControllerRef = useRef(new CaptureController());
   const stabilityTrackerRef = useRef(new DocumentStabilityTracker());
   const autoCaptureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recentFrameBufferRef = useRef(new RecentFrameBuffer(2));
+  const lastBufferedTimeRef = useRef(0);
+  const lastCaptureDiagnosticsRef = useRef<CaptureDiagnostics | null>(null);
+
+  useEffect(() => {
+    window.__bhejoCaptureDiagnostics = () => lastCaptureDiagnosticsRef.current;
+    return () => {
+      delete window.__bhejoCaptureDiagnostics;
+    };
+  }, []);
 
   const isRetakeMode = session.retakeTarget !== null;
   const targetPageNumber = session.retakeTarget
@@ -96,6 +134,7 @@ export function CameraScanner({
 
   const resetDetectionAndController = useCallback(() => {
     clearAutoCaptureTimer();
+    recentFrameBufferRef.current.releaseAll();
     captureControllerRef.current.reset();
     stabilityTrackerRef.current.reset();
     liveAnalysisRef.current = INITIAL_LIVE_ANALYSIS;
@@ -125,9 +164,105 @@ export function CameraScanner({
       let capturedFrameCanvas: HTMLCanvasElement | null = null;
 
       try {
-        const capturedFrame = captureVideoFrame(videoRef.current);
-        capturedFrameCanvas = capturedFrame.canvas;
-        const { detection, quality, analysisDimensions, displayCorners } = liveAnalysisRef.current;
+        const stream = getMediaStream();
+        let capturedStill: CapturedStillPhoto | null = null;
+        let qualityEval: CaptureQualityEvaluation | null = null;
+        let retried = false;
+        let usedFallback = false;
+
+        // Capture settle window: brief 80ms settle if manual capture to allow camera focus/exposure stabilization
+        if (source === "manual") {
+          await new Promise<void>((resolve) => setTimeout(resolve, 80));
+        }
+
+        // Attempt high-quality still capture using ImageCapture
+        if (stream && videoRef.current) {
+          try {
+            capturedStill = await captureStillPhoto(stream, videoRef.current, {
+              timeoutMs: 2200,
+            });
+            qualityEval = evaluateCaptureQuality(
+              capturedStill.canvas,
+              capturedStill.method,
+            );
+
+            // Bounded 1-shot retry if quality gate detects severe degradation
+            if (!qualityEval.isAcceptable) {
+              retried = true;
+              capturedStill.canvas.width = 0;
+              capturedStill.canvas.height = 0;
+              capturedStill = null;
+
+              // Brief settle pause before retry
+              await new Promise<void>((resolve) => setTimeout(resolve, 150));
+
+              if (mountedRef.current && stream && videoRef.current) {
+                try {
+                  capturedStill = await captureStillPhoto(stream, videoRef.current, {
+                    timeoutMs: 2200,
+                  });
+                  qualityEval = evaluateCaptureQuality(
+                    capturedStill.canvas,
+                    capturedStill.method,
+                  );
+                  if (!qualityEval.isAcceptable) {
+                    capturedStill.canvas.width = 0;
+                    capturedStill.canvas.height = 0;
+                    capturedStill = null;
+                  }
+                } catch {
+                  capturedStill = null;
+                }
+              }
+            }
+          } catch {
+            capturedStill = null;
+          }
+        }
+
+        // Prepare captured frame canvas
+        let sourceDimensions: { width: number; height: number };
+        let videoDimensions: { width: number; height: number } | undefined;
+        let captureMethod: "image-capture" | "video-frame" = "video-frame";
+        let initialSharpness = qualityEval?.sharpness ?? 0;
+
+        if (capturedStill) {
+          capturedFrameCanvas = capturedStill.canvas;
+          sourceDimensions = capturedStill.sourceDimensions;
+          videoDimensions = capturedStill.videoDimensions;
+          captureMethod = capturedStill.method;
+        } else {
+          // Fallback to best recent high-quality video frame or live video frame
+          usedFallback = true;
+          const bestCandidate = recentFrameBufferRef.current.getBestFrame();
+          if (bestCandidate) {
+            capturedFrameCanvas = bestCandidate.canvas;
+            sourceDimensions = {
+              width: bestCandidate.width,
+              height: bestCandidate.height,
+            };
+            videoDimensions = videoRef.current
+              ? {
+                  width: videoRef.current.videoWidth,
+                  height: videoRef.current.videoHeight,
+                }
+              : sourceDimensions;
+            initialSharpness = bestCandidate.sharpness;
+          } else if (videoRef.current) {
+            const fallbackFrame = captureVideoFrame(videoRef.current);
+            capturedFrameCanvas = fallbackFrame.canvas;
+            sourceDimensions = fallbackFrame.sourceDimensions;
+            videoDimensions = {
+              width: videoRef.current.videoWidth,
+              height: videoRef.current.videoHeight,
+            };
+          } else {
+            throw new Error("No video source available for capture.");
+          }
+        }
+
+        const { detection, quality, analysisDimensions, displayCorners } =
+          liveAnalysisRef.current;
         setIsProcessing(true);
         stopCamera();
 
@@ -146,15 +281,36 @@ export function CameraScanner({
               : null;
 
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+        const procStart = performance.now();
         const result = await processCapturedFrame({
-          capturedFrame,
+          capturedFrame: {
+            canvas: capturedFrameCanvas,
+            sourceDimensions,
+            videoDimensions,
+          },
           analysisCorners: targetCorners,
           analysisDimensions,
         });
+        const processingLatencyMs = performance.now() - procStart;
 
         if (!mountedRef.current || operationId !== operationIdRef.current) {
           return;
         }
+
+        // Record diagnostic metrics
+        lastCaptureDiagnosticsRef.current = {
+          method: captureMethod,
+          sourceDimensions,
+          sourceAspectRatio: sourceDimensions.width / sourceDimensions.height,
+          captureLatencyMs: capturedStill?.captureLatencyMs ?? 0,
+          processingLatencyMs,
+          initialSharpness,
+          outputDimensions: result.dimensions,
+          jpegSizeBytes: result.image.size,
+          retried,
+          usedFallback,
+        };
 
         controller.completeCapture(performance.now());
         const previewUrl = session.createPreviewUrl(result.image);
@@ -175,13 +331,23 @@ export function CameraScanner({
           capturedFrameCanvas.width = 0;
           capturedFrameCanvas.height = 0;
         }
+        recentFrameBufferRef.current.releaseAll();
         if (mountedRef.current && operationId === operationIdRef.current) {
           setCapturePending(false);
           setIsProcessing(false);
         }
       }
     },
-    [capturePending, clearAutoCaptureTimer, isProcessing, session, status, stopCamera, videoRef],
+    [
+      capturePending,
+      clearAutoCaptureTimer,
+      getMediaStream,
+      isProcessing,
+      session,
+      status,
+      stopCamera,
+      videoRef,
+    ],
   );
 
   const scheduleAutomaticCapture = useCallback(() => {
@@ -211,6 +377,21 @@ export function CameraScanner({
       liveAnalysisRef.current = nextAnalysis;
       setLiveAnalysis(nextAnalysis);
 
+      // Buffer high-quality candidate video frame for instant fallback if ImageCapture fails
+      if (
+        videoRef.current &&
+        detection !== null &&
+        (quality?.isAcceptable ?? false) &&
+        frame.timestamp - lastBufferedTimeRef.current >= 200
+      ) {
+        lastBufferedTimeRef.current = frame.timestamp;
+        recentFrameBufferRef.current.recordFrame(
+          videoRef.current,
+          detection.confidence,
+          frame.timestamp,
+        );
+      }
+
       const decision = captureControllerRef.current.observe(
         {
           documentDetected: detection !== null,
@@ -226,7 +407,7 @@ export function CameraScanner({
         scheduleAutomaticCapture();
       }
     },
-    [clearAutoCaptureTimer, scheduleAutomaticCapture],
+    [clearAutoCaptureTimer, scheduleAutomaticCapture, videoRef],
   );
 
   const processDocumentFrame = useDocumentDetection(
@@ -245,6 +426,7 @@ export function CameraScanner({
     mountedRef.current = true;
     const controller = captureControllerRef.current;
     const stabilityTracker = stabilityTrackerRef.current;
+    const recentFrameBuffer = recentFrameBufferRef.current;
 
     return () => {
       mountedRef.current = false;
@@ -252,6 +434,7 @@ export function CameraScanner({
       clearAutoCaptureTimer();
       controller.reset();
       stabilityTracker.reset();
+      recentFrameBuffer.releaseAll();
     };
   }, [clearAutoCaptureTimer]);
 
@@ -261,6 +444,7 @@ export function CameraScanner({
       clearAutoCaptureTimer();
       captureControllerRef.current.reset();
       stabilityTrackerRef.current.reset();
+      recentFrameBufferRef.current.releaseAll();
       liveAnalysisRef.current = INITIAL_LIVE_ANALYSIS;
     }
   }, [analysisActive, capturePending, clearAutoCaptureTimer, uiMode]);
