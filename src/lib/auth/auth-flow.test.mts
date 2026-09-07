@@ -230,6 +230,34 @@ test("Callback PKCE Exchange & Redirection Logic", () => {
   assert.strictEqual(sanitizeNext("//evil.com"), "/auth/confirmed");
   assert.strictEqual(sanitizeNext("https://evil.com"), "/auth/confirmed");
   assert.strictEqual(sanitizeNext("/auth/update-password"), "/auth/update-password");
+
+  // Test 5: Token Hash and Token parameter variant resolution
+  const urlWithTokenHash = new URL("https://bhejo.vyndra.tech/auth/callback?token_hash=th_12345&type=email");
+  const tokenHash1 = urlWithTokenHash.searchParams.get("token_hash") || urlWithTokenHash.searchParams.get("token");
+  assert.strictEqual(tokenHash1, "th_12345");
+
+  const urlWithToken = new URL("https://bhejo.vyndra.tech/auth/callback?token=t_67890&type=signup");
+  const tokenHash2 = urlWithToken.searchParams.get("token_hash") || urlWithToken.searchParams.get("token");
+  assert.strictEqual(tokenHash2, "t_67890");
+
+  // Test 6: Upstream Supabase otp_expired error detection
+  const expiredUrl = new URL("https://bhejo.vyndra.tech/auth/callback?error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired");
+  const errorCode = expiredUrl.searchParams.get("error_code");
+  const isOtpExpired = errorCode === "otp_expired" || expiredUrl.searchParams.get("error_description")?.toLowerCase().includes("expired");
+  assert.strictEqual(isOtpExpired, true);
+
+  // Test 7: PKCE verifier mismatch detection (cross-browser/device link clicks)
+  function isPkceMismatch(errorMessage: string): boolean {
+    const lower = errorMessage.toLowerCase();
+    return (
+      lower.includes("both auth code and code verifier should be non-empty") ||
+      lower.includes("code verifier") ||
+      lower.includes("invalid_grant")
+    );
+  }
+  assert.strictEqual(isPkceMismatch("both auth code and code verifier should be non-empty"), true);
+  assert.strictEqual(isPkceMismatch("Invalid grant: code verifier mismatch"), true);
+  assert.strictEqual(isPkceMismatch("Network error"), false);
 });
 
 test("Storage Service: SupabaseStorageService initialization and API surface", () => {

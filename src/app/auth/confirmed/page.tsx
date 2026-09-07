@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { CheckCircle } from "@phosphor-icons/react/dist/ssr";
+import { createClient } from "@/lib/supabase/server";
 import { BhejoLogo } from "@/shared/components/ui/BhejoLogo";
 import { Button } from "@/shared/components/ui/Button";
 
@@ -9,7 +10,18 @@ export const metadata: Metadata = {
   description: "Your Bhejo account email has been successfully confirmed.",
 };
 
-export default function ConfirmedPage() {
+export default async function ConfirmedPage() {
+  let isAuthenticated = false;
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    isAuthenticated = Boolean(user?.email_confirmed_at);
+  } catch {
+    // If checking session fails, fall back to Sign In
+  }
+
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-canvas px-5 py-12">
       <div className="w-full max-w-md space-y-6">
@@ -42,8 +54,13 @@ export default function ConfirmedPage() {
           </div>
 
           <div className="pt-2">
-            <Button href="/login" variant="primary" size="lg" fullWidth>
-              Sign In
+            <Button
+              href={isAuthenticated ? "/dashboard" : "/login"}
+              variant="primary"
+              size="lg"
+              fullWidth
+            >
+              {isAuthenticated ? "Go to Dashboard" : "Sign In"}
             </Button>
           </div>
         </div>

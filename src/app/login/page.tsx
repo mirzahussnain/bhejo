@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 interface LoginPageProps {
-  readonly searchParams: Promise<{ redirectTo?: string; error?: string }>;
+  readonly searchParams: Promise<{ redirectTo?: string; error?: string; notice?: string }>;
 }
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
@@ -23,6 +23,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const initialError =
     params?.error === "auth-code-error"
       ? "Your confirmation or reset link was invalid or has expired. Please try again."
+      : undefined;
+  const initialNotice =
+    params?.notice === "link-used-or-expired"
+      ? "This confirmation link has already been used or has expired. If you've already confirmed your email, please sign in below."
       : undefined;
 
   return (
@@ -47,7 +51,11 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           />
 
           {/* Sign In Form */}
-          <LoginForm redirectTo={redirectTo} initialError={initialError} />
+          <LoginForm
+            redirectTo={redirectTo}
+            initialError={initialError}
+            initialNotice={initialNotice}
+          />
         </div>
       </div>
     </main>

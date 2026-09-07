@@ -10,20 +10,23 @@ import { createClient } from "@/lib/supabase/client";
 interface LoginFormProps {
   readonly redirectTo: string;
   readonly initialError?: string;
+  readonly initialNotice?: string;
 }
 
-export function LoginForm({ redirectTo, initialError }: LoginFormProps) {
+export function LoginForm({ redirectTo, initialError, initialNotice }: LoginFormProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(initialError ?? null);
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(initialNotice ?? null);
   const [socialNotice, setSocialNotice] = useState<string | null>(null);
   const router = useRouter();
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setErrorMessage(null);
+    setNoticeMessage(null);
     setSocialNotice(null);
 
     const trimmedEmail = email.trim();
@@ -81,6 +84,15 @@ export function LoginForm({ redirectTo, initialError }: LoginFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="mt-8 space-y-4" noValidate>
+      {noticeMessage && (
+        <div
+          role="status"
+          className="rounded-2xl border border-brand-border bg-brand-subtle p-4 text-xs font-medium text-brand leading-relaxed animate-in fade-in duration-200"
+        >
+          {noticeMessage}
+        </div>
+      )}
+
       {errorMessage && (
         <div
           role="alert"
