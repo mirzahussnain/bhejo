@@ -15,7 +15,11 @@ interface LoginPageProps {
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const params = await searchParams;
-  const redirectTo = params?.redirectTo || "/dashboard";
+  const rawRedirect = params?.redirectTo;
+  const redirectTo =
+    rawRedirect && rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")
+      ? rawRedirect
+      : "/dashboard";
   const initialError =
     params?.error === "auth-code-error"
       ? "Your confirmation or reset link was invalid or has expired. Please try again."

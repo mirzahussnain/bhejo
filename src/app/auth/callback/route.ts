@@ -12,7 +12,11 @@ export async function GET(request: Request) {
   const code = requestUrl.searchParams.get("code");
   const tokenHash = requestUrl.searchParams.get("token_hash");
   const type = requestUrl.searchParams.get("type") as EmailOtpType | null;
-  const next = requestUrl.searchParams.get("next") || "/auth/confirmed";
+  const rawNext = requestUrl.searchParams.get("next");
+  const next =
+    rawNext && rawNext.startsWith("/") && !rawNext.startsWith("//")
+      ? rawNext
+      : "/auth/confirmed";
 
   // Resolve base origin (accounting for reverse proxies / load balancers)
   const forwardedHost = request.headers.get("x-forwarded-host");

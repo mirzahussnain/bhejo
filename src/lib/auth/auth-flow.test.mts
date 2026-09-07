@@ -222,6 +222,14 @@ test("Callback PKCE Exchange & Redirection Logic", () => {
   const forwardedHost = "bhejo.vyndra.tech, proxy.lan";
   const origin = `https://${forwardedHost.split(",")[0].trim()}`;
   assert.strictEqual(origin, "https://bhejo.vyndra.tech");
+
+  // Test 4: Open redirect prevention (rejects protocol-relative and external URLs)
+  function sanitizeNext(param: string | null): string {
+    return param && param.startsWith("/") && !param.startsWith("//") ? param : "/auth/confirmed";
+  }
+  assert.strictEqual(sanitizeNext("//evil.com"), "/auth/confirmed");
+  assert.strictEqual(sanitizeNext("https://evil.com"), "/auth/confirmed");
+  assert.strictEqual(sanitizeNext("/auth/update-password"), "/auth/update-password");
 });
 
 test("Storage Service: SupabaseStorageService initialization and API surface", () => {
