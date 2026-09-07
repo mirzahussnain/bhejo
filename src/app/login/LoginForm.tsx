@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Eye, EyeSlash } from "@phosphor-icons/react";
 import { Button } from "@/shared/components/ui/Button";
@@ -8,15 +9,15 @@ import { createClient } from "@/lib/supabase/client";
 
 interface LoginFormProps {
   readonly redirectTo: string;
+  readonly initialError?: string;
 }
 
-export function LoginForm({ redirectTo }: LoginFormProps) {
+export function LoginForm({ redirectTo, initialError }: LoginFormProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(initialError ?? null);
   const [socialNotice, setSocialNotice] = useState<string | null>(null);
   const router = useRouter();
 
@@ -59,7 +60,11 @@ export function LoginForm({ redirectTo }: LoginFormProps) {
       }
 
       if (data.session) {
-        router.push(redirectTo);
+        if (data.user && !data.user.email_confirmed_at) {
+          router.push("/auth/verify-email");
+        } else {
+          router.push(redirectTo);
+        }
         router.refresh();
       } else {
         setIsLoading(false);
@@ -154,24 +159,14 @@ export function LoginForm({ redirectTo }: LoginFormProps) {
         </div>
       </div>
 
-      {/* Remember Me & Forgot Password Row */}
-      <div className="flex items-center justify-between pt-1">
-        <label className="flex items-center gap-2 text-xs font-medium text-canvas-muted cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={rememberMe}
-            onChange={(e) => setRememberMe(e.target.checked)}
-            className="size-4 rounded-md border-canvas-border text-brand focus:ring-brand/40 accent-brand"
-          />
-          <span>Remember me</span>
-        </label>
-
-        <a
-          href="mailto:support@bhejo.app?subject=Password%20Reset%20Request"
+      {/* Forgot Password Link */}
+      <div className="flex items-center justify-end pt-1">
+        <Link
+          href="/auth/forgot-password"
           className="text-xs font-semibold text-brand hover:text-brand-dark transition-colors"
         >
           Forgot password?
-        </a>
+        </Link>
       </div>
 
       {/* Sign In Primary Action Button: 100% consistent with landing page buttons */}

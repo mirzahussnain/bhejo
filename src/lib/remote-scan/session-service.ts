@@ -403,6 +403,19 @@ export async function processPageUpload(
     };
   }
 
+  if (!dbResult.success && !dbResult.isDuplicate) {
+    return {
+      status: 500,
+      body: {
+        success: false,
+        pageId,
+        pageNumber,
+        status: "uploaded",
+        error: "Failed to record page upload in repository",
+      },
+    };
+  }
+
   // Record activity event on new upload
   if (!dbResult.isDuplicate) {
     await repo.addActivity({
@@ -449,6 +462,33 @@ export async function finalizeSession(
     return { status: 404, body: { error: "Session not found" } };
   }
 
+  // Idempotent finalization: if session is already completed, verify pages match
+  if (session.status === "completed") {
+    if (session.recipientTokenHash && !verifyTokenHash(recipientToken, session.recipientTokenHash)) {
+      return { status: 401, body: { error: "Invalid recipient token" } };
+    }
+
+    const storedPages = await repo.getPagesForSession(session.id);
+    const storedIds = new Set(storedPages.map((p) => p.id));
+    const isExactMatch =
+      Array.isArray(clientPageIds) &&
+      clientPageIds.length === storedPages.length &&
+      clientPageIds.every((id) => storedIds.has(id));
+
+    if (isExactMatch) {
+      return {
+        status: 200,
+        body: {
+          success: true,
+          status: "completed",
+          pageCount: storedPages.length,
+        },
+      };
+    }
+
+    return { status: 409, body: { error: "Session already completed" } };
+  }
+
   if (!session.recipientTokenHash || !verifyTokenHash(recipientToken, session.recipientTokenHash)) {
     return { status: 401, body: { error: "Invalid recipient token" } };
   }
@@ -457,10 +497,6 @@ export async function finalizeSession(
 
   if (now > session.expiresAt || (session.activeScanExpiresAt && now > session.activeScanExpiresAt)) {
     return { status: 410, body: { error: "Session expired" } };
-  }
-
-  if (session.status === "completed") {
-    return { status: 409, body: { error: "Session already completed" } };
   }
 
   if (session.status !== "uploading" && session.status !== "authenticated") {

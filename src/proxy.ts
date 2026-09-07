@@ -5,6 +5,8 @@ export async function proxy(request: NextRequest) {
   const { response, user } = await updateSession(request);
   const pathname = request.nextUrl.pathname;
 
+  const isEmailConfirmed = Boolean(user?.email_confirmed_at);
+
   // Protected routes: /dashboard and sub-paths
   if (pathname.startsWith("/dashboard")) {
     if (!user) {
@@ -13,11 +15,33 @@ export async function proxy(request: NextRequest) {
       url.searchParams.set("redirectTo", pathname);
       return NextResponse.redirect(url);
     }
+    if (!isEmailConfirmed) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/auth/verify-email";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
   }
 
-  // Auth pages: redirect authenticated users to dashboard
+  // Auth pages: redirect authenticated users according to email confirmation status
   if (pathname === "/login" || pathname === "/signup") {
     if (user) {
+      const url = request.nextUrl.clone();
+      url.pathname = isEmailConfirmed ? "/dashboard" : "/auth/verify-email";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
+  }
+
+  // Verify email gate page: only accessible by authenticated users with unconfirmed email
+  if (pathname === "/auth/verify-email") {
+    if (!user) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/login";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
+    if (isEmailConfirmed) {
       const url = request.nextUrl.clone();
       url.pathname = "/dashboard";
       url.search = "";

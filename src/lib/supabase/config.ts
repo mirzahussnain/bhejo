@@ -20,3 +20,7 @@ export function getSupabaseAnonKey(): string {
 export function getSupabaseSecretKey(): string {
   return (process.env.SUPABASE_SECRET_KEY || "").trim();
 }
+
+export function getSupportEmail(): string {
+  return (process.env.NEXT_PUBLIC_SUPPORT_EMAIL || "noreply@bhejo.vyndra.tech").trim();
+}

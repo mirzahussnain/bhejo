@@ -1,3 +1,5 @@
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
 export interface StorageService {
   savePage(sessionId: string, pageId: string, buffer: Buffer): Promise<string>;
   getPage(storagePath: string): Promise<Buffer | null>;
@@ -33,88 +35,66 @@ export class InMemoryStorageService implements StorageService {
 }
 
 export class SupabaseStorageService implements StorageService {
-  private readonly baseUrl: string;
-  private readonly serviceRoleKey: string;
+  private readonly client: SupabaseClient;
   private readonly bucketName: string;
 
   constructor(
     supabaseUrl: string,
-    serviceRoleKey: string,
+    secretKey: string,
     bucketName: string = process.env.STORAGE_BUCKET || "documents",
   ) {
-    this.baseUrl = supabaseUrl.trim().replace(/\/rest\/v1\/?$/i, "").replace(/\/+$/, "");
-    this.serviceRoleKey = serviceRoleKey;
+    const baseUrl = supabaseUrl.trim().replace(/\/rest\/v1\/?$/i, "").replace(/\/+$/, "");
+    this.client = createClient(baseUrl, secretKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
     this.bucketName = bucketName;
-  }
-
-  private headers(contentType?: string) {
-    const h: Record<string, string> = {
-      apikey: this.serviceRoleKey,
-      Authorization: `Bearer ${this.serviceRoleKey}`,
-    };
-    if (contentType) {
-      h["Content-Type"] = contentType;
-    }
-    return h;
   }
 
   async savePage(sessionId: string, pageId: string, buffer: Buffer): Promise<string> {
     const storagePath = `sessions/${sessionId}/pages/${pageId}.jpg`;
-    const url = `${this.baseUrl}/storage/v1/object/${this.bucketName}/${storagePath}`;
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: this.headers("image/jpeg"),
-      body: new Uint8Array(buffer),
-    });
+    const { error } = await this.client.storage
+      .from(this.bucketName)
+      .upload(storagePath, buffer, {
+        contentType: "image/jpeg",
+        upsert: true,
+      });
 
-    if (!res.ok) {
-      throw new Error(`Failed to upload to Supabase storage: ${res.statusText}`);
+    if (error) {
+      throw new Error(`Failed to upload to Supabase storage: ${error.message}`);
     }
 
     return storagePath;
   }
 
   async getPage(storagePath: string): Promise<Buffer | null> {
-    const url = `${this.baseUrl}/storage/v1/object/${this.bucketName}/${storagePath}`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: this.headers(),
-    });
+    const cleanPath = storagePath.replace(/^\/+/, "");
+    const { data, error } = await this.client.storage
+      .from(this.bucketName)
+      .download(cleanPath);
 
-    if (!res.ok) {
+    if (error || !data) {
       return null;
     }
 
-    const arrayBuffer = await res.arrayBuffer();
+    const arrayBuffer = await data.arrayBuffer();
     return Buffer.from(arrayBuffer);
   }
 
   async deleteSessionPages(sessionId: string): Promise<void> {
-    const listUrl = `${this.baseUrl}/storage/v1/object/list/${this.bucketName}`;
-    const listRes = await fetch(listUrl, {
-      method: "POST",
-      headers: this.headers("application/json"),
-      body: JSON.stringify({
-        prefix: `sessions/${sessionId}`,
-      }),
-    });
+    const { data: files, error } = await this.client.storage
+      .from(this.bucketName)
+      .list(`sessions/${sessionId}`);
 
-    if (!listRes.ok) {
-      return;
-    }
-
-    const files = (await listRes.json()) as Array<{ name: string }>;
-    if (!files || files.length === 0) {
+    if (error || !files || files.length === 0) {
       return;
     }
 
     const prefixes = files.map((f) => `sessions/${sessionId}/${f.name}`);
-    await fetch(`${this.baseUrl}/storage/v1/object/${this.bucketName}`, {
-      method: "DELETE",
-      headers: this.headers("application/json"),
-      body: JSON.stringify({ prefixes }),
-    });
+    await this.client.storage.from(this.bucketName).remove(prefixes);
   }
 }
 

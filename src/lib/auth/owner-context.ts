@@ -5,6 +5,7 @@ export interface OwnerContext {
   readonly ownerId: string;
   readonly email?: string;
   readonly fullName?: string;
+  readonly emailConfirmed?: boolean;
 }
 
 /**
@@ -13,6 +14,7 @@ export interface OwnerContext {
  * of specific auth mechanisms or tokens.
  *
  * Verifies Supabase session either via Bearer JWT or SSR session cookies.
+ * Enforces that owner's email MUST be confirmed before accessing owner features.
  */
 export async function getAuthenticatedOwner(request: Request): Promise<OwnerContext | null> {
   const supabaseUrl = getSupabaseUrl();
@@ -37,13 +39,15 @@ export async function getAuthenticatedOwner(request: Request): Promise<OwnerCont
           const user = (await userRes.json()) as {
             id: string;
             email?: string;
+            email_confirmed_at?: string | null;
             user_metadata?: { full_name?: string };
           };
-          if (user && user.id) {
+          if (user && user.id && user.email_confirmed_at) {
             return {
               ownerId: user.id,
               email: user.email,
               fullName: user.user_metadata?.full_name,
+              emailConfirmed: true,
             };
           }
         }
@@ -78,11 +82,12 @@ export async function getAuthenticatedOwner(request: Request): Promise<OwnerCont
           error,
         } = await supabase.auth.getUser();
 
-        if (!error && user && user.id) {
+        if (!error && user && user.id && user.email_confirmed_at) {
           return {
             ownerId: user.id,
             email: user.email,
             fullName: (user.user_metadata as { full_name?: string } | undefined)?.full_name,
+            emailConfirmed: true,
           };
         }
       } catch {
@@ -93,18 +98,21 @@ export async function getAuthenticatedOwner(request: Request): Promise<OwnerCont
 
   // Test environment fallback: only active when NODE_ENV === "test"
   if (process.env.NODE_ENV === "test") {
+    if (request.headers.get("X-Test-Email-Unconfirmed") === "true") {
+      return null;
+    }
     const devHeader = request.headers.get("X-Test-Owner-Id");
     if (devHeader) {
-      return { ownerId: devHeader, email: "test@example.com", fullName: "Test Owner" };
+      return { ownerId: devHeader, email: "test@example.com", fullName: "Test Owner", emailConfirmed: true };
     }
-    return { ownerId: "test_owner_default", email: "test@example.com", fullName: "Test Owner Default" };
+    return { ownerId: "test_owner_default", email: "test@example.com", fullName: "Test Owner Default", emailConfirmed: true };
   }
 
   // Local development fallback: only active when NODE_ENV === "development" and Supabase is not configured
   if (process.env.NODE_ENV === "development" && !supabaseUrl) {
-    return { ownerId: "dev_owner_default", email: "dev@example.com", fullName: "Dev Owner Default" };
+    return { ownerId: "dev_owner_default", email: "dev@example.com", fullName: "Dev Owner Default", emailConfirmed: true };
   }
 
-  // In production (or when auth is required): unauthenticated requests are rejected
+  // In production (or when auth is required): unauthenticated or unconfirmed requests are rejected
   return null;
 }

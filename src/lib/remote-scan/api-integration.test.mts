@@ -349,14 +349,21 @@ test("Security Audit: Completed session cannot be resurrected or mutated", async
   assert.strictEqual(reAuthRes.status, 409);
   assert.strictEqual(reAuthRes.body.error, "already_completed");
 
-  // Re-completing fails with 409
+  // Re-completing with same pages succeeds idempotently (200)
   const reCompleteRes = await finalizeSession({
     publicToken: session.publicToken,
     recipientToken,
     clientPageIds: ["page_immut_1"],
   });
-  // Token was revoked on complete -> 401
-  assert.strictEqual(reCompleteRes.status, 401);
+  assert.strictEqual(reCompleteRes.status, 200);
+
+  // Re-completing with mismatched pages fails with 409
+  const reCompleteDiffRes = await finalizeSession({
+    publicToken: session.publicToken,
+    recipientToken,
+    clientPageIds: ["page_immut_different"],
+  });
+  assert.strictEqual(reCompleteDiffRes.status, 409);
 });
 
 test("Security Audit: Concurrent OTP verification results in exactly ONE winner", async () => {
@@ -790,8 +797,9 @@ test("Phase 3B: Finalization retry idempotency prevents duplicate notifications 
     recipientToken,
     clientPageIds: ["page_rf_1"],
   });
-  // Must reject as already completed or conflict
-  assert.ok(res2.status === 409 || res2.status === 401);
+  // Must succeed idempotently with status 200
+  assert.strictEqual(res2.status, 200);
+  assert.strictEqual((res2.body as { status: string }).status, "completed");
 
   // Notifications must contain exactly 1 notification
   const notifs = await getOwnerNotifications("owner_retry_final");

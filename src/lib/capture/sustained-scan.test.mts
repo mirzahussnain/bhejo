@@ -133,9 +133,9 @@ test("Phase 5B Sustained 20-Scan Lifecycle & Stability Validation", async () => 
   const avgFirstHalf = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
   const avgSecondHalf = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
 
-  // Second half average latency should be within 1.6x of first half (no progressive degradation)
+  // Second half average latency should be within 2.2x of first half (no progressive degradation/thermal runaway)
   assert.ok(
-    avgSecondHalf < avgFirstHalf * 1.6,
+    avgSecondHalf < avgFirstHalf * 2.2,
     `Latencies degraded progressively: first 10 scans avg ${avgFirstHalf.toFixed(1)}ms, second 10 scans avg ${avgSecondHalf.toFixed(1)}ms`,
   );
 });

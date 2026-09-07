@@ -21,6 +21,10 @@ export default async function DashboardPage() {
     redirect("/login");
   }
 
+  if (!user.email_confirmed_at) {
+    redirect("/auth/verify-email");
+  }
+
   const fullName =
     (user.user_metadata?.full_name as string | undefined) ||
     (user.email ? user.email.split("@")[0] : "User");

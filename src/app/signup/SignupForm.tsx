@@ -60,6 +60,7 @@ export function SignupForm() {
 
     try {
       const supabase = createClient();
+      const origin = typeof window !== "undefined" ? window.location.origin : "";
       const { data, error } = await supabase.auth.signUp({
         email: trimmedEmail,
         password,
@@ -67,6 +68,7 @@ export function SignupForm() {
           data: {
             full_name: trimmedName,
           },
+          emailRedirectTo: `${origin}/auth/callback?next=/auth/confirmed`,
         },
       });
 
@@ -76,8 +78,8 @@ export function SignupForm() {
         return;
       }
 
-      // Check if session was created or email confirmation is required
-      if (data.user && !data.session) {
+      // Check if email confirmation is required or pending
+      if (data.user && !data.user.email_confirmed_at) {
         setConfirmationNotice(true);
         setIsLoading(false);
         return;

@@ -10,12 +10,16 @@ export const metadata: Metadata = {
 };
 
 interface LoginPageProps {
-  readonly searchParams: Promise<{ redirectTo?: string }>;
+  readonly searchParams: Promise<{ redirectTo?: string; error?: string }>;
 }
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const params = await searchParams;
   const redirectTo = params?.redirectTo || "/dashboard";
+  const initialError =
+    params?.error === "auth-code-error"
+      ? "Your confirmation or reset link was invalid or has expired. Please try again."
+      : undefined;
 
   return (
     <main className="min-h-screen w-full bg-canvas lg:grid lg:grid-cols-2">
@@ -39,7 +43,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           />
 
           {/* Sign In Form */}
-          <LoginForm redirectTo={redirectTo} />
+          <LoginForm redirectTo={redirectTo} initialError={initialError} />
         </div>
       </div>
     </main>
