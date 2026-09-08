@@ -1089,7 +1089,10 @@ export function verifyTemporalPrior(
       quad.metrics.boundaryScore * 0.2,
   };
 
-  return refineDetection(cv, unrefinedDetection, edgeMap, grayscale, config);
+  // Return verified prior detection directly.
+  // Re-running recursive line-fitting refinement on every frame causes outward drift/expansion
+  // on high-texture backgrounds (e.g. carpet fibers or wood grain).
+  return unrefinedDetection;
 }
 
 export function runDocumentDetection(

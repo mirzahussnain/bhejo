@@ -358,3 +358,75 @@ test("regression suite: ID cards, A4, single passport page, open passport spread
   const spreadScore = scoreDocumentCandidate(openSpread, undefined, createBoundaryEvidence([0.82, 0.80, 0.84, 0.81]));
   assert.ok(spreadScore > 0.65, `Open passport spread should score well (got ${spreadScore})`);
 });
+
+test("temporal prior verification does not expand corners across consecutive frames on carpet background", async () => {
+  const cv = await loadOpenCv();
+  const width = 320;
+  const height = 240;
+  const edges = new cv.Mat(height, width, cv.CV_8UC1);
+  const grayscale = new cv.Mat(height, width, cv.CV_8UC1);
+
+  // Document interior (clean paper)
+  for (let y = 40; y < 200; y += 1) {
+    for (let x = 60; x < 260; x += 1) {
+      grayscale.data[y * width + x] = 230;
+    }
+  }
+
+  // Document boundaries at x in [60, 260], y in [40, 200]
+  for (let x = 60; x <= 260; x += 1) {
+    edges.data[40 * width + x] = 255;
+    edges.data[200 * width + x] = 255;
+  }
+  for (let y = 40; y <= 200; y += 1) {
+    edges.data[y * width + 60] = 255;
+    edges.data[y * width + 260] = 255;
+  }
+
+  // Add random carpet texture noise edges outside the document
+  for (let y = 0; y < height; y += 3) {
+    for (let x = 0; x < width; x += 4) {
+      if (x < 55 || x > 265 || y < 35 || y > 205) {
+        edges.data[y * width + x] = 255;
+        grayscale.data[y * width + x] = ((x * 17 + y * 31) % 180) + 40;
+      }
+    }
+  }
+
+  const initialCorners: DocumentCorners = [
+    { x: 60, y: 40 },
+    { x: 260, y: 40 },
+    { x: 260, y: 200 },
+    { x: 60, y: 200 },
+  ];
+
+  const frame = { canvas: {} as HTMLCanvasElement, width, height, timestamp: 1000 };
+
+  try {
+    let currentCorners = initialCorners;
+    // Simulate 20 consecutive frames of temporal prior verification
+    for (let f = 0; f < 20; f += 1) {
+      const verified = verifyTemporalPrior(
+        cv,
+        frame,
+        edges,
+        grayscale,
+        currentCorners,
+        DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+        0.85,
+      );
+      assert.ok(verified !== null, `Frame ${f} should verify intact document`);
+      currentCorners = verified.corners;
+    }
+
+    // After 20 frames, corners must remain strictly unchanged (zero drift/expansion)
+    for (let i = 0; i < 4; i += 1) {
+      assert.equal(currentCorners[i].x, initialCorners[i].x, `Corner ${i} x expanded`);
+      assert.equal(currentCorners[i].y, initialCorners[i].y, `Corner ${i} y expanded`);
+    }
+  } finally {
+    edges.delete();
+    grayscale.delete();
+  }
+});
+
