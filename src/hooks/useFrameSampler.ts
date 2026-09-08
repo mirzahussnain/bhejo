@@ -19,6 +19,7 @@ interface UseFrameSamplerOptions {
   readonly videoRef: RefObject<HTMLVideoElement | null>;
   readonly onFrame?: (frame: AnalysisFrame) => void;
   readonly config?: Partial<FrameSamplerConfig>;
+  readonly targetFps?: number;
 }
 
 const ignoreFrame = () => undefined;
@@ -28,12 +29,20 @@ export function useFrameSampler({
   videoRef,
   onFrame = ignoreFrame,
   config,
+  targetFps,
 }: UseFrameSamplerOptions) {
   const onFrameRef = useRef(onFrame);
+  const samplerRef = useRef<ReturnType<typeof createFrameSampler> | null>(null);
 
   useEffect(() => {
     onFrameRef.current = onFrame;
   }, [onFrame]);
+
+  useEffect(() => {
+    if (samplerRef.current && targetFps !== undefined) {
+      samplerRef.current.setAnalysisFps(targetFps);
+    }
+  }, [targetFps]);
 
   useEffect(() => {
     if (!active || !videoRef.current) {
@@ -45,6 +54,11 @@ export function useFrameSampler({
       (frame) => onFrameRef.current(frame),
       config,
     );
+    samplerRef.current = sampler;
+
+    if (targetFps !== undefined) {
+      sampler.setAnalysisFps(targetFps);
+    }
 
     const syncWithPageVisibility = () => {
       if (document.hidden) {
@@ -64,6 +78,7 @@ export function useFrameSampler({
     return () => {
       document.removeEventListener("visibilitychange", syncWithPageVisibility);
       sampler.stop();
+      samplerRef.current = null;
 
       if (
         process.env.NODE_ENV === "development" &&
@@ -72,5 +87,5 @@ export function useFrameSampler({
         delete window.__bhejoFrameSamplerDiagnostics;
       }
     };
-  }, [active, config, videoRef]);
+  }, [active, config, targetFps, videoRef]);
 }

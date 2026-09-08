@@ -986,7 +986,111 @@ function refineDetection(
   };
 }
 
+/**
+ * Lightweight temporal prior verification.
+ * Directly samples boundary support and region contrast around previousCorners
+ * using a resolution-scaled search margin.
+ *
+ * If boundary support remains valid and geometry is intact, refines corners
+ * and returns the detection immediately (~1.5-3ms total).
+ * If evidence is weak or contradictory, returns null to cascade to normal multi-pass detection.
+ */
+export function verifyTemporalPrior(
+  cv: typeof OpenCV,
+  frame: AnalysisFrame,
+  edges: OpenCV.Mat,
+  grayscale: OpenCV.Mat,
+  previousCorners: DocumentCorners,
+  config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  previousConfidence?: number | null,
+): DocumentDetection | null {
+  if (
+    previousConfidence !== undefined &&
+    previousConfidence !== null &&
+    previousConfidence < 0.75
+  ) {
+    return null;
+  }
 
+  const quad = validateQuadrilateral(
+    previousCorners,
+    frame.width,
+    frame.height,
+    config,
+  );
+  if (!quad) {
+    return null;
+  }
+
+  const parallelism = calculateOppositeEdgeParallelism(quad.corners);
+  if (parallelism < 0.65) {
+    return null;
+  }
+
+  const searchMargin = Math.max(
+    3,
+    Math.min(8, Math.round(Math.min(frame.width, frame.height) * 0.012)),
+  );
+
+  const edgeMap: EdgeMap = {
+    data: edges.data,
+    width: frame.width,
+    height: frame.height,
+  };
+
+  const grayMap: GrayscaleMap = {
+    data: grayscale.data,
+    width: frame.width,
+    height: frame.height,
+  };
+
+  const evidenceConfig: CandidateEvidenceConfig = {
+    ...config.standardEvidence,
+    edgeSearchRadiusPx: searchMargin,
+  };
+
+  const boundaryEvidence = calculateCandidateBoundaryEvidence(
+    edgeMap,
+    quad.corners,
+    evidenceConfig,
+    grayMap,
+  );
+
+  const isHighTex = boundaryEvidence.textureContext?.isHighTextureBackground ?? false;
+  const minAvg = isHighTex ? 0.46 : 0.40;
+  const minWeak = isHighTex ? 0.18 : 0.14;
+
+  if (
+    boundaryEvidence.averageSupport < minAvg ||
+    boundaryEvidence.weakestSideSupport < minWeak ||
+    boundaryEvidence.strongSideCount < 3
+  ) {
+    return null;
+  }
+
+  const confidence = scoreDocumentCandidate(
+    quad,
+    config.targetAreaRatio,
+    boundaryEvidence,
+  );
+
+  if (confidence < 0.72) {
+    return null;
+  }
+
+  const unrefinedDetection: DocumentDetection = {
+    corners: quad.corners,
+    confidence,
+    areaRatio: quad.metrics.areaRatio,
+    edgeSupport: boundaryEvidence.averageSupport,
+    geometryScore:
+      quad.metrics.angleScore * 0.5 +
+      quad.metrics.edgeConsistency * 0.3 +
+      quad.metrics.boundaryScore * 0.2,
+  };
+
+  return refineDetection(cv, unrefinedDetection, edgeMap, grayscale, config);
+}
 
 export function runDocumentDetection(
   cv: typeof OpenCV,
@@ -1042,6 +1146,33 @@ export function runDocumentDetection(
       true,
     );
 
+    // Temporal Prior Verification: Check if previously tracked confident document is still intact
+    if (
+      previousCorners &&
+      (previousConfidence === undefined ||
+        previousConfidence === null ||
+        previousConfidence >= 0.75)
+    ) {
+      const priorDetection = verifyTemporalPrior(
+        cv,
+        frame,
+        edges,
+        grayscale,
+        previousCorners,
+        config,
+        previousConfidence,
+      );
+      if (priorDetection) {
+        return {
+          detection: priorDetection,
+          contourCount: 0,
+          quadrilateralCount: 1,
+          strategy: "temporal-prior-verification",
+          previousCorners: priorDetection.corners,
+          previousConfidence: priorDetection.confidence,
+        };
+      }
+    }
     cv.morphologyEx(
       edges,
       edges,
@@ -1091,7 +1222,13 @@ export function runDocumentDetection(
 
     // Fast-path: When standard Canny produces a decisive, high-confidence document
     // detection with strong 4-sided support, return it immediately.
-    if (isStrongDocumentWinner(standardWinner)) {
+    const isPass1WinnerDecisive =
+      standardWinner !== null &&
+      (isStrongDocumentWinner(standardWinner) ||
+        (standardWinner.detection.confidence >= 0.82 &&
+          standardWinner.detection.areaRatio >= 0.20));
+
+    if (isPass1WinnerDecisive) {
       return {
         detection: refineDetection(
           cv,
@@ -1219,8 +1356,8 @@ export function runDocumentDetection(
     const isDecisiveFullDocument =
       pooledWinner !== null &&
       (isStrongDocumentWinner(pooledWinner) ||
-        (pooledWinner.detection.confidence >= 0.85 &&
-          pooledWinner.detection.areaRatio >= 0.25));
+        (pooledWinner.detection.confidence >= 0.82 &&
+          pooledWinner.detection.areaRatio >= 0.20));
 
     if (isDecisiveFullDocument) {
       return {

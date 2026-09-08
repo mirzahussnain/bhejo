@@ -32,6 +32,7 @@ export interface FrameSampler {
   start: () => void;
   stop: () => void;
   getDiagnostics: () => FrameSamplerDiagnostics;
+  setAnalysisFps: (fps: number) => void;
 }
 
 type AnalysisFrameCallback = (frame: AnalysisFrame) => void;
@@ -87,6 +88,7 @@ export function createFrameSampler(
 ): FrameSampler {
   const { analysisWidth, analysisFps } = resolveFrameSamplerConfig(config);
   const sampleInterval = 1_000 / analysisFps;
+  let currentSampleInterval = sampleInterval;
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", { willReadFrequently: true });
 
@@ -156,7 +158,7 @@ export function createFrameSampler(
     scheduleNextFrame();
 
     if (
-      timestamp - lastSampleTimestamp >= sampleInterval &&
+      timestamp - lastSampleTimestamp >= currentSampleInterval &&
       video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
     ) {
       if (updateAnalysisDimensions()) {
@@ -186,6 +188,11 @@ export function createFrameSampler(
       if (animationFrameId !== null) {
         cancelAnimationFrame(animationFrameId);
         animationFrameId = null;
+      }
+    },
+    setAnalysisFps(fps: number) {
+      if (Number.isFinite(fps) && fps > 0) {
+        currentSampleInterval = 1_000 / fps;
       }
     },
     getDiagnostics() {

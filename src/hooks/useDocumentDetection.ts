@@ -71,12 +71,14 @@ export function useDocumentDetection(
   });
 
   const lastWinningCornersRef = useRef<DocumentCorners | null>(null);
+  const lastWinningConfidenceRef = useRef<number | null>(null);
 
   useEffect(() => {
     activeRef.current = active;
 
     if (!active) {
       lastWinningCornersRef.current = null;
+      lastWinningConfidenceRef.current = null;
       diagnosticsRef.current = {
         ...diagnosticsRef.current,
         status: "idle",
@@ -110,6 +112,7 @@ export function useDocumentDetection(
         .catch(() => {
           if (!cancelled && activeRef.current) {
             lastWinningCornersRef.current = null;
+            lastWinningConfidenceRef.current = null;
             diagnosticsRef.current = {
               ...diagnosticsRef.current,
               status: "error",
@@ -158,9 +161,11 @@ export function useDocumentDetection(
         frame,
         undefined,
         lastWinningCornersRef.current,
+        lastWinningConfidenceRef.current,
       );
       const { detection } = result;
       lastWinningCornersRef.current = detection?.corners ?? null;
+      lastWinningConfidenceRef.current = detection?.confidence ?? null;
       diagnosticsRef.current = {
         status: "ready",
         documentDetected: detection !== null,
@@ -181,6 +186,7 @@ export function useDocumentDetection(
       onProcessedFrameRef.current?.({ frame, detection });
     } catch {
       lastWinningCornersRef.current = null;
+      lastWinningConfidenceRef.current = null;
       diagnosticsRef.current = {
         ...diagnosticsRef.current,
         status: "error",
