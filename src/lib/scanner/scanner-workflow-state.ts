@@ -55,6 +55,10 @@ export function canTransitionTo(
   }
 }
 
+export function isFrameAnalysisAllowed(state: ScannerWorkflowState): boolean {
+  return state === "SCANNING" || state === "CAPTURE_PREPARING";
+}
+
 export function isCaptureInProgress(state: ScannerWorkflowState): boolean {
   return (
     state === "CAPTURE_PREPARING" ||

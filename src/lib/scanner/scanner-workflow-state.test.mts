@@ -5,6 +5,7 @@ import {
   evaluateQualityFailureRetry,
   getWorkflowLabel,
   isCaptureInProgress,
+  isFrameAnalysisAllowed,
   shouldIgnoreCaptureTrigger,
   type ScannerWorkflowState,
 } from "./scanner-workflow-state.ts";
@@ -58,6 +59,14 @@ test("identifies active capture and duplicate trigger suppression", () => {
 
   assert.equal(isCaptureInProgress("COMPLETE"), false);
   assert.equal(shouldIgnoreCaptureTrigger("COMPLETE"), true);
+});
+
+test("identifies states where frame analysis is allowed", () => {
+  assert.equal(isFrameAnalysisAllowed("SCANNING"), true);
+  assert.equal(isFrameAnalysisAllowed("CAPTURE_PREPARING"), true);
+  assert.equal(isFrameAnalysisAllowed("CAPTURING_HIGH_QUALITY"), false);
+  assert.equal(isFrameAnalysisAllowed("PROCESSING"), false);
+  assert.equal(isFrameAnalysisAllowed("COMPLETE"), false);
 });
 
 test("evaluates quality failure retry limits deterministically", () => {
