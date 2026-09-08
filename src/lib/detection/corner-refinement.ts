@@ -23,9 +23,9 @@ export interface CornerRefinementConfig {
 }
 
 export const DEFAULT_CORNER_REFINEMENT_CONFIG: CornerRefinementConfig = {
-  corridorWidthPx: 8,
+  corridorWidthPx: 12,
   minEdgePixels: 10,
-  maxCornerDisplacementPx: 14,
+  maxCornerDisplacementPx: 24,
   maxAreaChangeRatio: 0.25,
   subPixelWindowSize: 5,
   subPixelMaxIterations: 30,

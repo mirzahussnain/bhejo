@@ -139,9 +139,9 @@ test("returns null for identical lines", () => {
 // --- refineCorners integration (tested via geometry validation outcomes) ---
 
 test("refinement config has conservative defaults", () => {
-  assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.corridorWidthPx, 8);
+  assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.corridorWidthPx, 12);
   assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.minEdgePixels, 10);
-  assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.maxCornerDisplacementPx, 14);
+  assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.maxCornerDisplacementPx, 24);
   assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.maxAreaChangeRatio, 0.25);
   assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.subPixelWindowSize, 5);
   assert.equal(DEFAULT_CORNER_REFINEMENT_CONFIG.subPixelMaxIterations, 30);

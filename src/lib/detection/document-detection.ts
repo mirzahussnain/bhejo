@@ -65,6 +65,7 @@ export interface DocumentDetectorConfig
   readonly coarseBlurKernelSize?: number;
   readonly minContainmentAreaRatio: number;
   readonly containmentTolerancePx: number;
+  readonly cornerExpansionRatio?: number;
 }
 
 export type DocumentCandidateStrategy =
@@ -100,7 +101,8 @@ export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
   fallbackCannyHighThreshold: 55,
   fallbackMorphologyKernelSize: 7,
   coarseBlurKernelSize: 9,
-  polygonApproximationRatios: [0.015, 0.02, 0.03],
+  polygonApproximationRatios: [0.008, 0.012, 0.016, 0.022, 0.03],
+  cornerExpansionRatio: 0.008,
   minAreaRatio: 0.02,
   maxAreaRatio: 0.96,
   minEdgeRatio: 0.06,
@@ -955,6 +957,47 @@ function preprocessFrame(
 }
 
 /**
+ * Applies a subtle outward apex expansion (typically 0.8% ~ 1.5-2.5px)
+ * to align corners with the outer physical boundary of the paper rather
+ * than the midpoint inflection of the blurred Canny gradient transition,
+ * preventing clipped corner tips.
+ */
+export function expandCornersOutward(
+  corners: DocumentCorners,
+  frameWidth: number,
+  frameHeight: number,
+  expansionRatio = 0.008,
+): DocumentCorners {
+  if (expansionRatio <= 0) {
+    return corners;
+  }
+
+  const cx = (corners[0].x + corners[1].x + corners[2].x + corners[3].x) / 4;
+  const cy = (corners[0].y + corners[1].y + corners[2].y + corners[3].y) / 4;
+
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+  return [
+    {
+      x: clamp(cx + (corners[0].x - cx) * (1 + expansionRatio), 0, frameWidth),
+      y: clamp(cy + (corners[0].y - cy) * (1 + expansionRatio), 0, frameHeight),
+    },
+    {
+      x: clamp(cx + (corners[1].x - cx) * (1 + expansionRatio), 0, frameWidth),
+      y: clamp(cy + (corners[1].y - cy) * (1 + expansionRatio), 0, frameHeight),
+    },
+    {
+      x: clamp(cx + (corners[2].x - cx) * (1 + expansionRatio), 0, frameWidth),
+      y: clamp(cy + (corners[2].y - cy) * (1 + expansionRatio), 0, frameHeight),
+    },
+    {
+      x: clamp(cx + (corners[3].x - cx) * (1 + expansionRatio), 0, frameWidth),
+      y: clamp(cy + (corners[3].y - cy) * (1 + expansionRatio), 0, frameHeight),
+    },
+  ];
+}
+
+/**
  * Refines the corners of a detection result using line-fitting and
  * sub-pixel refinement. Returns the original detection unchanged if
  * refinement produces a worse result.
@@ -976,13 +1019,15 @@ function refineDetection(
     config.cornerRefinement,
   );
 
-  if (refined === detection.corners) {
-    return detection;
-  }
+  const expansionRatio = config.cornerExpansionRatio ?? 0.008;
+  const corners =
+    expansionRatio > 0
+      ? expandCornersOutward(refined, edgeMap.width, edgeMap.height, expansionRatio)
+      : refined;
 
   return {
     ...detection,
-    corners: refined,
+    corners,
   };
 }
 
