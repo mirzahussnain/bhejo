@@ -22,6 +22,9 @@ export type BenchmarkBackground =
   | "grey-surface"
   | "patterned-grid"
   | "textured-noise"
+  | "textured-carpet"
+  | "patterned-carpet"
+  | "wood-floor-seams"
   | "low-contrast-surface"
   | "coloured-surface";
 
@@ -80,6 +83,9 @@ export const BENCHMARK_BACKGROUNDS: readonly BenchmarkBackground[] = [
   "grey-surface",
   "patterned-grid",
   "textured-noise",
+  "textured-carpet",
+  "patterned-carpet",
+  "wood-floor-seams",
   "low-contrast-surface",
   "coloured-surface",
 ];
@@ -164,6 +170,33 @@ function getBackgroundPixel(
       const frac = n - Math.floor(n);
       const val = Math.round(145 + frac * 30);
       return [val, val, val];
+    }
+    case "textured-carpet": {
+      // Carpet weave with high spatial frequency fiber texture
+      const fiber = Math.sin(x * 0.8 + Math.cos(y * 0.6) * 3) * 18 +
+                    Math.sin(y * 1.2 + Math.cos(x * 0.9) * 2) * 18;
+      const n = Math.sin(x * 37.1 + y * 91.7) * 43758.5453;
+      const hash = (n - Math.floor(n)) * 26 - 13;
+      const base = Math.max(0, Math.min(255, Math.round(115 + fiber + hash)));
+      return [base, Math.round(base * 0.95), Math.round(base * 0.9)];
+    }
+    case "patterned-carpet": {
+      // Oriental/geometric weave rug with repetitive ornamental pattern
+      const pattern = Math.sin(x / 8) * Math.cos(y / 8) * 24;
+      const n = Math.sin(x * 17.3 + y * 41.9) * 43758.5453;
+      const grain = (n - Math.floor(n)) * 20 - 10;
+      const base = Math.max(0, Math.min(255, Math.round(120 + pattern + grain)));
+      return [Math.round(base * 1.08), base, Math.round(base * 0.88)];
+    }
+    case "wood-floor-seams": {
+      // Hardwood plank flooring with horizontal seams every 60px and subtle grain
+      const isSeam = y % 60 < 2 || (x % 180 < 2 && Math.floor(y / 60) % 2 === 0);
+      if (isSeam) {
+        return [40, 30, 20]; // Dark seam gap
+      }
+      const grain = Math.sin(y / 4 + Math.sin(x / 30) * 3) * 22;
+      const base = Math.max(0, Math.min(255, Math.round(140 + grain)));
+      return [Math.round(base * 1.15), base, Math.round(base * 0.75)];
     }
     case "low-contrast-surface":
       return [225, 225, 225];
@@ -679,6 +712,9 @@ export function runBenchmarkSuite(cv: typeof OpenCV): BenchmarkSuiteReport {
     "grey-surface": 0,
     "patterned-grid": 0,
     "textured-noise": 0,
+    "textured-carpet": 0,
+    "patterned-carpet": 0,
+    "wood-floor-seams": 0,
     "low-contrast-surface": 0,
     "coloured-surface": 0,
   };
@@ -703,6 +739,9 @@ export function runBenchmarkSuite(cv: typeof OpenCV): BenchmarkSuiteReport {
     "grey-surface": 0,
     "patterned-grid": 0,
     "textured-noise": 0,
+    "textured-carpet": 0,
+    "patterned-carpet": 0,
+    "wood-floor-seams": 0,
     "low-contrast-surface": 0,
     "coloured-surface": 0,
   };

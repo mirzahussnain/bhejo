@@ -3,6 +3,7 @@ import type { AnalysisFrame } from "@/lib/camera/frame-sampler";
 import {
   DEFAULT_CONTAINMENT_TOLERANCE_PX,
   calculateBoundingBoxIoU,
+  calculateOppositeEdgeParallelism,
   cornersBoundingBox,
   distance,
   isContainedWithin,
@@ -72,13 +73,16 @@ export type DocumentCandidateStrategy =
   | "open-spread-hypothesis"
   | "weak-edge-contour"
   | "weak-edge-reconstruction"
-  | "low-contrast-evidence-fusion";
+  | "low-contrast-evidence-fusion"
+  | "temporal-prior-verification";
 
 export interface DocumentDetectionRun {
   readonly detection: DocumentDetection | null;
   readonly contourCount: number;
   readonly quadrilateralCount: number;
   readonly strategy: DocumentCandidateStrategy | null;
+  readonly previousCorners?: DocumentCorners | null;
+  readonly previousConfidence?: number | null;
 }
 
 export const DEFAULT_DOCUMENT_DETECTOR_CONFIG: DocumentDetectorConfig = {
@@ -152,27 +156,61 @@ export function scoreDocumentCandidate(
     Math.sqrt(candidate.metrics.areaRatio / targetAreaRatio),
   );
 
+  const parallelism =
+    boundaryEvidence.oppositeEdgeParallelism ??
+    calculateOppositeEdgeParallelism(candidate.corners);
+  const parallelismFactor = 0.35 + 0.65 * parallelism;
+
   const rc = boundaryEvidence.regionContrast;
+  const normalAlign = boundaryEvidence.edgeNormalAlignment;
+  const cornerScore = boundaryEvidence.cornerDirectionalScore;
+
+  let baseScore: number;
   if (rc) {
-    return clampScore(
-      areaScore * 0.12 +
+    if (normalAlign !== undefined && cornerScore !== undefined) {
+      baseScore =
+        areaScore * 0.10 +
+        candidate.metrics.angleScore * 0.13 +
+        candidate.metrics.edgeConsistency * 0.08 +
+        candidate.metrics.boundaryScore * 0.06 +
+        boundaryEvidence.averageSupport * 0.25 +
+        boundaryEvidence.weakestSideSupport * 0.10 +
+        rc.regionContrastScore * 0.12 +
+        normalAlign * 0.08 +
+        cornerScore * 0.08;
+    } else {
+      baseScore =
+        areaScore * 0.12 +
         candidate.metrics.angleScore * 0.15 +
         candidate.metrics.edgeConsistency * 0.10 +
         candidate.metrics.boundaryScore * 0.07 +
         boundaryEvidence.averageSupport * 0.30 +
         boundaryEvidence.weakestSideSupport * 0.12 +
-        rc.regionContrastScore * 0.14,
-    );
+        rc.regionContrastScore * 0.14;
+    }
+  } else {
+    if (normalAlign !== undefined && cornerScore !== undefined) {
+      baseScore =
+        areaScore * 0.12 +
+        candidate.metrics.angleScore * 0.15 +
+        candidate.metrics.edgeConsistency * 0.09 +
+        candidate.metrics.boundaryScore * 0.06 +
+        boundaryEvidence.averageSupport * 0.32 +
+        boundaryEvidence.weakestSideSupport * 0.12 +
+        normalAlign * 0.07 +
+        cornerScore * 0.07;
+    } else {
+      baseScore =
+        areaScore * 0.14 +
+        candidate.metrics.angleScore * 0.17 +
+        candidate.metrics.edgeConsistency * 0.1 +
+        candidate.metrics.boundaryScore * 0.07 +
+        boundaryEvidence.averageSupport * 0.38 +
+        boundaryEvidence.weakestSideSupport * 0.14;
+    }
   }
 
-  return clampScore(
-    areaScore * 0.14 +
-      candidate.metrics.angleScore * 0.17 +
-      candidate.metrics.edgeConsistency * 0.1 +
-      candidate.metrics.boundaryScore * 0.07 +
-      boundaryEvidence.averageSupport * 0.38 +
-      boundaryEvidence.weakestSideSupport * 0.14,
-  );
+  return clampScore(baseScore * parallelismFactor);
 }
 
 function readContourPoints(contour: OpenCV.Mat): Point[] {
@@ -948,11 +986,14 @@ function refineDetection(
   };
 }
 
+
+
 export function runDocumentDetection(
   cv: typeof OpenCV,
   frame: AnalysisFrame,
   config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
   previousCorners?: DocumentCorners | null,
+  previousConfidence?: number | null,
 ): DocumentDetectionRun {
   const source = cv.imread(frame.canvas);
 
@@ -1000,6 +1041,7 @@ export function runDocumentDetection(
       3,
       true,
     );
+
     cv.morphologyEx(
       edges,
       edges,
@@ -1061,6 +1103,8 @@ export function runDocumentDetection(
         contourCount: totalContourCount,
         quadrilateralCount: totalQuadrilateralCount,
         strategy: standardWinner!.strategy,
+        previousCorners: standardWinner!.detection.corners,
+        previousConfidence: standardWinner!.detection.confidence,
       };
     }
 
@@ -1190,6 +1234,8 @@ export function runDocumentDetection(
         contourCount: totalContourCount,
         quadrilateralCount: totalQuadrilateralCount,
         strategy: pooledWinner.strategy,
+        previousCorners: pooledWinner.detection.corners,
+        previousConfidence: pooledWinner.detection.confidence,
       };
     }
 
@@ -1349,6 +1395,9 @@ export function runDocumentDetection(
               if (quad.metrics.angleScore < 0.65) continue;
               // 2. Must have consistent opposite edges (edgeConsistency >= 0.65)
               if (quad.metrics.edgeConsistency < 0.65) continue;
+              // 2b. Opposite edge parallelism check (reject non-affine carpet texture fragments)
+              const quadParallelism = calculateOppositeEdgeParallelism(quad.corners);
+              if (quadParallelism < 0.65) continue;
 
               // 3. Document aspect ratio check (1.05 to 4.5)
               const topW = distance(quad.corners[0], quad.corners[1]);
@@ -1372,6 +1421,12 @@ export function runDocumentDetection(
               if (!rc || rc.averageStep < 1.5) {
                 // Reject completely flat empty surfaces (table/floor/wall)
                 continue;
+              }
+
+              // 4b. Background texture adaptivity: reject chaotic texture clumps
+              if (evidence.textureContext?.isHighTextureBackground) {
+                if ((evidence.edgeNormalAlignment ?? 1.0) < 0.40) continue;
+                if (evidence.averageSupport < 0.35) continue;
               }
 
               // 5. Distributed evidence across at least 3 sides
@@ -1431,6 +1486,8 @@ export function runDocumentDetection(
       contourCount: totalContourCount,
       quadrilateralCount: totalQuadrilateralCount,
       strategy: finalWinner?.strategy ?? null,
+      previousCorners: refinedFinal?.corners ?? null,
+      previousConfidence: refinedFinal?.confidence ?? null,
     };
   } finally {
     claheResult?.delete();
@@ -1453,6 +1510,13 @@ export function detectDocument(
   frame: AnalysisFrame,
   config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
   previousCorners?: DocumentCorners | null,
+  previousConfidence?: number | null,
 ): DocumentDetection | null {
-  return runDocumentDetection(cv, frame, config, previousCorners).detection;
+  return runDocumentDetection(
+    cv,
+    frame,
+    config,
+    previousCorners,
+    previousConfidence,
+  ).detection;
 }

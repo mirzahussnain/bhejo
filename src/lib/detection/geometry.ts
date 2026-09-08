@@ -440,3 +440,113 @@ export function calculateBoundingBoxIoU(boxA: BoundingBox, boxB: BoundingBox): n
 
   return intersectionArea / unionArea;
 }
+
+/**
+ * Calculates opposite-edge directional consistency with perspective convergence tolerance.
+ *
+ * In planar perspective projection under real-world camera tilt, opposite edges
+ * naturally converge toward vanishing points (typically 0° - 18° divergence,
+ * up to 25° for steep perspective). Severe divergence (> 30°) indicates irregular,
+ * non-affine shapes (e.g. jagged carpet noise contours, organic blobs).
+ *
+ * Returns a normalized score in [0, 1].
+ */
+export function calculateOppositeEdgeParallelism(corners: DocumentCorners): number {
+  // Top: corners[0] -> corners[1]
+  const topDx = corners[1].x - corners[0].x;
+  const topDy = corners[1].y - corners[0].y;
+  const topLen = Math.hypot(topDx, topDy);
+
+  // Bottom: corners[3] -> corners[2] (pointing left to right, matching top edge direction)
+  const botDx = corners[2].x - corners[3].x;
+  const botDy = corners[2].y - corners[3].y;
+  const botLen = Math.hypot(botDx, botDy);
+
+  // Left: corners[0] -> corners[3] (pointing top to bottom)
+  const leftDx = corners[3].x - corners[0].x;
+  const leftDy = corners[3].y - corners[0].y;
+  const leftLen = Math.hypot(leftDx, leftDy);
+
+  // Right: corners[1] -> corners[2] (pointing top to bottom, matching left edge direction)
+  const rightDx = corners[2].x - corners[1].x;
+  const rightDy = corners[2].y - corners[1].y;
+  const rightLen = Math.hypot(rightDx, rightDy);
+
+  if (topLen < 1e-4 || botLen < 1e-4 || leftLen < 1e-4 || rightLen < 1e-4) {
+    return 0;
+  }
+
+  // Angular deviation between top and bottom edge vectors
+  const horizCos = Math.max(-1, Math.min(1, (topDx * botDx + topDy * botDy) / (topLen * botLen)));
+  const horizAngleDeg = (Math.acos(horizCos) * 180) / Math.PI;
+
+  // Angular deviation between left and right edge vectors
+  const vertCos = Math.max(-1, Math.min(1, (leftDx * rightDx + leftDy * rightDy) / (leftLen * rightLen)));
+  const vertAngleDeg = (Math.acos(vertCos) * 180) / Math.PI;
+
+  // Perspective tolerance calibration:
+  // 0° - 20°: 1.0 (perspective convergence under natural viewing angles)
+  // 20° - 38°: graceful linear decline from 1.0 down to 0.5 (steep perspective)
+  // 38° - 60°: decline from 0.5 down to 0.0 (non-affine distortion / texture noise)
+  // > 60°: 0.0
+  const scoreAngle = (deg: number): number => {
+    if (deg <= 20) {
+      return 1.0;
+    }
+    if (deg <= 38) {
+      return 1.0 - ((deg - 20) / (38 - 20)) * 0.5;
+    }
+    if (deg <= 60) {
+      return Math.max(0, 0.5 - ((deg - 38) / (60 - 38)) * 0.5);
+    }
+    return 0;
+  };
+
+  const horizScore = scoreAngle(horizAngleDeg);
+  const vertScore = scoreAngle(vertAngleDeg);
+
+  return Math.min(horizScore, vertScore) * 0.6 + ((horizScore + vertScore) / 2) * 0.4;
+}
+
+/**
+ * Measures the linearity / straightness of a sequence of points representing an edge.
+ * Computes maximum perpendicular deviation from the chord connecting endpoints,
+ * normalized by segment length.
+ *
+ * Straight line segments return close to 1.0. Jagged or zig-zagging texture fragments
+ * return low scores (< 0.5).
+ */
+export function calculateSideStraightness(points: readonly Point[]): number {
+  if (points.length <= 2) {
+    return 1.0;
+  }
+
+  const start = points[0];
+  const end = points[points.length - 1];
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+
+  if (length < 1e-4) {
+    return 0.0;
+  }
+
+  let maxPerpDistance = 0;
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const p = points[i];
+    const perpDist = Math.abs(dx * (start.y - p.y) - dy * (start.x - p.x)) / length;
+    if (perpDist > maxPerpDistance) {
+      maxPerpDistance = perpDist;
+    }
+  }
+
+  const deviationRatio = maxPerpDistance / length;
+  if (deviationRatio <= 0.025) {
+    return 1.0;
+  }
+  if (deviationRatio >= 0.10) {
+    return 0.0;
+  }
+  return 1.0 - (deviationRatio - 0.025) / (0.10 - 0.025);
+}
+
