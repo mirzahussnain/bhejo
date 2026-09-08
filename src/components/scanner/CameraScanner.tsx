@@ -23,6 +23,11 @@ import {
   type CaptureQualityEvaluation,
 } from "@/lib/capture/capture-quality";
 import { RecentFrameBuffer } from "@/lib/capture/recent-frame-buffer";
+import {
+  type ScannerWorkflowState,
+  isCaptureInProgress,
+  shouldIgnoreCaptureTrigger,
+} from "@/lib/scanner/scanner-workflow-state";
 import { processCapturedFrame } from "@/lib/capture-processing/processing-pipeline";
 import type { DocumentDetection } from "@/lib/detection/document-detection";
 import { analyseDocumentQuality, type DocumentQuality } from "@/lib/quality/document-quality";
@@ -93,6 +98,7 @@ export function CameraScanner({
   const session = useDocumentSession();
 
   const [uiMode, setUiMode] = useState<ScannerUIMode>("camera");
+  const [workflowState, setWorkflowState] = useState<ScannerWorkflowState>("SCANNING");
   const [currentCapture, setCurrentCapture] = useState<CurrentCapture | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isProcessingError, setIsProcessingError] = useState(false);
@@ -135,7 +141,11 @@ export function CameraScanner({
     status === "ready" &&
     uiMode === "camera" &&
     !isProcessing &&
-    !capturePending;
+    !capturePending &&
+    !isCaptureInProgress(workflowState);
+
+  const isDocumentTracked = liveAnalysis.detection !== null;
+  const targetFps = isDocumentTracked ? 12 : 8;
 
   const clearAutoCaptureTimer = useCallback(() => {
     if (autoCaptureTimerRef.current !== null) {
@@ -151,12 +161,20 @@ export function CameraScanner({
     stabilityTrackerRef.current.reset();
     liveAnalysisRef.current = INITIAL_LIVE_ANALYSIS;
     setLiveAnalysis(INITIAL_LIVE_ANALYSIS);
+    setWorkflowState("SCANNING");
   }, [clearAutoCaptureTimer]);
 
   const performCapture = useCallback(
     async (source: "automatic" | "manual") => {
       const controller = captureControllerRef.current;
-      if (status !== "ready" || !videoRef.current || capturePending || isProcessing) {
+      if (
+        status !== "ready" ||
+        !videoRef.current ||
+        capturePending ||
+        isProcessing ||
+        (source === "automatic" && workflowState !== "CAPTURE_PREPARING") ||
+        (source === "manual" && shouldIgnoreCaptureTrigger(workflowState))
+      ) {
         return;
       }
       const captureAccepted =
@@ -170,6 +188,7 @@ export function CameraScanner({
       const operationId = operationIdRef.current + 1;
       operationIdRef.current = operationId;
       clearAutoCaptureTimer();
+      setWorkflowState("CAPTURING_HIGH_QUALITY");
       setCapturePending(true);
       setCaptureFailed(false);
 
@@ -287,6 +306,7 @@ export function CameraScanner({
         const { detection, quality, analysisDimensions, displayCorners } =
           liveAnalysisRef.current;
         setIsProcessing(true);
+        setWorkflowState("PROCESSING");
         stopCamera();
 
         // For manual capture: if detection is low-confidence or quality unacceptable (e.g. barcode-only),
@@ -343,12 +363,15 @@ export function CameraScanner({
           previewUrl,
           correctionFallback: result.correctionFailed,
         });
+        setWorkflowState("COMPLETE");
         setUiMode("page-preview");
       } catch (err) {
         console.error("[CameraScanner] Capture processing error:", err);
         controller.failCapture();
         if (mountedRef.current) {
           setIsProcessingError(true);
+          setCaptureFailed(true);
+          setWorkflowState("SCANNING");
         }
       } finally {
         if (capturedFrameCanvas) {
@@ -370,16 +393,21 @@ export function CameraScanner({
       status,
       stopCamera,
       videoRef,
+      workflowState,
     ],
   );
 
   const scheduleAutomaticCapture = useCallback(() => {
+    if (shouldIgnoreCaptureTrigger(workflowState)) {
+      return;
+    }
     clearAutoCaptureTimer();
+    setWorkflowState("CAPTURE_PREPARING");
     autoCaptureTimerRef.current = setTimeout(() => {
       autoCaptureTimerRef.current = null;
       void performCapture("automatic");
     }, AUTO_CAPTURE_DELAY_MS);
-  }, [clearAutoCaptureTimer, performCapture]);
+  }, [clearAutoCaptureTimer, performCapture, workflowState]);
 
   const handleProcessedFrame = useCallback(
     ({ frame, detection }: ProcessedDocumentFrame) => {
@@ -410,6 +438,7 @@ export function CameraScanner({
       );
       if (decision.shouldCancel) {
         clearAutoCaptureTimer();
+        setWorkflowState((prev) => (prev === "CAPTURE_PREPARING" ? "SCANNING" : prev));
       }
       if (decision.shouldSchedule) {
         scheduleAutomaticCapture();
@@ -427,6 +456,7 @@ export function CameraScanner({
     active: analysisActive,
     videoRef,
     onFrame: processDocumentFrame,
+    targetFps,
   });
 
   // Cleanup on unmount
@@ -736,6 +766,7 @@ export function CameraScanner({
         <ScannerGuidance
           scannerState={scannerState}
           qualityGuidance={displayedAnalysis.quality?.guidance ?? null}
+          workflowState={workflowState}
         />
       </header>
 
