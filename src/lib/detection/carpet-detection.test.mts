@@ -17,10 +17,13 @@ import {
 } from "./candidate-evidence.ts";
 import {
   DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  runDocumentDetection,
   scoreDocumentCandidate,
   verifyTemporalPrior,
+  verifyTemporalPriorCandidate,
 } from "./document-detection.ts";
 import { loadOpenCv } from "./opencv-loader.ts";
+import { createSyntheticFixture } from "./background-benchmark.ts";
 
 const frameWidth = 640;
 const frameHeight = 480;
@@ -246,6 +249,19 @@ test("temporal prior verification accepts intact tracking and rejects stale or m
 
   try {
     // 1. Intact tracking: previousCorners matches current document edges
+    const candidate = verifyTemporalPriorCandidate(
+      cv,
+      frame,
+      edges,
+      grayscale,
+      corners,
+      DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+      0.88,
+    );
+    assert.ok(candidate !== null, "Temporal prior candidate should verify intact boundary");
+    assert.equal(candidate.strategy, "temporal-prior-verification");
+    assert.ok(candidate.boundaryEvidence.averageSupport >= 0.40);
+
     const verified = verifyTemporalPrior(
       cv,
       frame,
@@ -429,4 +445,97 @@ test("temporal prior verification does not expand corners across consecutive fra
     grayscale.delete();
   }
 });
+
+test("runDocumentDetection discovers superior corners and moves instead of locking onto suboptimal prior", async () => {
+  const cv = await loadOpenCv();
+  const fixture = createSyntheticFixture("grey-surface", "a4-document", 640, 480);
+  const [gt0, gt1, gt2, gt3] = fixture.groundTruthCorners;
+
+  // Simulate a suboptimal prior detection that latched onto an internal feature/sub-box (30px inward)
+  const suboptimalPriorCorners: DocumentCorners = [
+    { x: gt0.x + 30, y: gt0.y + 30 },
+    { x: gt1.x - 30, y: gt1.y + 30 },
+    { x: gt2.x - 30, y: gt2.y - 30 },
+    { x: gt3.x + 30, y: gt3.y - 30 },
+  ];
+
+  const result = runDocumentDetection(
+    cv,
+    fixture.frame,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+    suboptimalPriorCorners,
+    0.76,
+  );
+
+  assert.ok(result.detection !== null, "Detector must find a valid document");
+  assert.ok(result.detection.corners !== null, "Detection must have corners");
+
+  // The detector must NOT remain locked on the suboptimal prior corners.
+  // It must move to the true outer document boundary!
+  const detectedCorners = result.detection.corners;
+  const distFromPrior0 = Math.hypot(
+    detectedCorners[0].x - suboptimalPriorCorners[0].x,
+    detectedCorners[0].y - suboptimalPriorCorners[0].y,
+  );
+  const distFromGt0 = Math.hypot(
+    detectedCorners[0].x - gt0.x,
+    detectedCorners[0].y - gt0.y,
+  );
+
+  assert.ok(
+    distFromPrior0 > 15,
+    `Corner 0 should have moved away from suboptimal prior (distance: ${distFromPrior0}px)`,
+  );
+  assert.ok(
+    distFromGt0 < 10,
+    `Corner 0 should align with true document boundary (distance to GT: ${distFromGt0}px)`,
+  );
+  assert.notEqual(
+    result.strategy,
+    "temporal-prior-verification",
+    "Detector must upgrade to standard contour detection rather than locking into prior",
+  );
+});
+
+test("runDocumentDetection preserves steady prior when prior is already optimal and accurate", async () => {
+  const cv = await loadOpenCv();
+  const fixture = createSyntheticFixture("grey-surface", "a4-document", 640, 480);
+
+  // First run: detect document without prior
+  const firstRun = runDocumentDetection(
+    cv,
+    fixture.frame,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  );
+  assert.ok(firstRun.detection !== null);
+  const initialCorners = firstRun.detection.corners;
+  const initialConfidence = firstRun.detection.confidence;
+
+  // Second run: pass optimal corners as previousCorners
+  const secondRun = runDocumentDetection(
+    cv,
+    fixture.frame,
+    DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+    initialCorners,
+    initialConfidence,
+  );
+
+  assert.ok(secondRun.detection !== null);
+  assert.ok(
+    secondRun.strategy === "temporal-prior-verification" ||
+      secondRun.strategy === "standard-edge-contour",
+  );
+  // Corners must remain aligned with ground truth
+  for (let i = 0; i < 4; i += 1) {
+    assert.ok(
+      Math.abs(secondRun.detection.corners[i].x - initialCorners[i].x) <= 3,
+      `Corner ${i} x shifted excessively`,
+    );
+    assert.ok(
+      Math.abs(secondRun.detection.corners[i].y - initialCorners[i].y) <= 3,
+      `Corner ${i} y shifted excessively`,
+    );
+  }
+});
+
 

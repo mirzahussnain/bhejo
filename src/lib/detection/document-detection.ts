@@ -995,7 +995,7 @@ function refineDetection(
  * and returns the detection immediately (~1.5-3ms total).
  * If evidence is weak or contradictory, returns null to cascade to normal multi-pass detection.
  */
-export function verifyTemporalPrior(
+export function verifyTemporalPriorCandidate(
   cv: typeof OpenCV,
   frame: AnalysisFrame,
   edges: OpenCV.Mat,
@@ -1003,7 +1003,7 @@ export function verifyTemporalPrior(
   previousCorners: DocumentCorners,
   config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
   previousConfidence?: number | null,
-): DocumentDetection | null {
+): ScoredDocumentCandidate | null {
   if (
     previousConfidence !== undefined &&
     previousConfidence !== null &&
@@ -1089,10 +1089,43 @@ export function verifyTemporalPrior(
       quad.metrics.boundaryScore * 0.2,
   };
 
-  // Return verified prior detection directly.
+  // Return verified prior candidate directly.
   // Re-running recursive line-fitting refinement on every frame causes outward drift/expansion
   // on high-texture backgrounds (e.g. carpet fibers or wood grain).
-  return unrefinedDetection;
+  return {
+    detection: unrefinedDetection,
+    strategy: "temporal-prior-verification",
+    boundaryEvidence,
+  };
+}
+
+/**
+ * Lightweight temporal prior verification.
+ * Directly samples boundary support and region contrast around previousCorners
+ * using a resolution-scaled search margin.
+ *
+ * If boundary support remains valid and geometry is intact, returns the detection.
+ * If evidence is weak or contradictory, returns null to cascade to normal multi-pass detection.
+ */
+export function verifyTemporalPrior(
+  cv: typeof OpenCV,
+  frame: AnalysisFrame,
+  edges: OpenCV.Mat,
+  grayscale: OpenCV.Mat,
+  previousCorners: DocumentCorners,
+  config: DocumentDetectorConfig = DEFAULT_DOCUMENT_DETECTOR_CONFIG,
+  previousConfidence?: number | null,
+): DocumentDetection | null {
+  const candidate = verifyTemporalPriorCandidate(
+    cv,
+    frame,
+    edges,
+    grayscale,
+    previousCorners,
+    config,
+    previousConfidence,
+  );
+  return candidate?.detection ?? null;
 }
 
 export function runDocumentDetection(
@@ -1149,33 +1182,6 @@ export function runDocumentDetection(
       true,
     );
 
-    // Temporal Prior Verification: Check if previously tracked confident document is still intact
-    if (
-      previousCorners &&
-      (previousConfidence === undefined ||
-        previousConfidence === null ||
-        previousConfidence >= 0.75)
-    ) {
-      const priorDetection = verifyTemporalPrior(
-        cv,
-        frame,
-        edges,
-        grayscale,
-        previousCorners,
-        config,
-        previousConfidence,
-      );
-      if (priorDetection) {
-        return {
-          detection: priorDetection,
-          contourCount: 0,
-          quadrilateralCount: 1,
-          strategy: "temporal-prior-verification",
-          previousCorners: priorDetection.corners,
-          previousConfidence: priorDetection.confidence,
-        };
-      }
-    }
     cv.morphologyEx(
       edges,
       edges,
@@ -1217,19 +1223,68 @@ export function runDocumentDetection(
     let totalQuadrilateralCount =
       standardResult.quadrilateralCount + standardSpreads.length;
 
+    // Temporal Prior Candidate: Check if previously tracked confident document is verified on current edges
+    let priorCandidate: ScoredDocumentCandidate | null = null;
+    if (
+      previousCorners &&
+      (previousConfidence === undefined ||
+        previousConfidence === null ||
+        previousConfidence >= 0.75)
+    ) {
+      priorCandidate = verifyTemporalPriorCandidate(
+        cv,
+        frame,
+        edges,
+        grayscale,
+        previousCorners,
+        config,
+        previousConfidence,
+      );
+    }
+
+    // Dynamic Candidate Competition & Corner Upgrades:
+    // Standard contour candidates come first so that dynamic contours fitted to live
+    // image edges are preferred over static priors when scores are equal.
+    // If prior corners were suboptimal or an inner feature, standard candidates that enclose
+    // or score higher than the prior will defeat it and update corners.
+    const pass1Candidates = priorCandidate
+      ? [...standardPool, priorCandidate]
+      : standardPool;
+
     const standardWinner = selectBestCandidate(
-      standardPool,
+      pass1Candidates,
       config,
       previousCorners,
     );
 
-    // Fast-path: When standard Canny produces a decisive, high-confidence document
-    // detection with strong 4-sided support, return it immediately.
+    // Fast-path 1: When prior candidate wins and is decisive/confident, return it immediately
+    // to preserve thermal and CPU efficiency without running expensive subsequent passes.
+    if (
+      standardWinner &&
+      standardWinner.strategy === "temporal-prior-verification" &&
+      (isStrongDocumentWinner(standardWinner) ||
+        standardWinner.detection.confidence >= 0.76)
+    ) {
+      return {
+        detection: standardWinner.detection,
+        contourCount: totalContourCount,
+        quadrilateralCount: totalQuadrilateralCount,
+        strategy: "temporal-prior-verification",
+        previousCorners: standardWinner.detection.corners,
+        previousConfidence: standardWinner.detection.confidence,
+      };
+    }
+
+    // Fast-path 2: When Pass 1 produces a decisive document winner (or improves upon prior),
+    // refine corners against edge lines and return immediately.
     const isPass1WinnerDecisive =
       standardWinner !== null &&
+      standardWinner.strategy !== "temporal-prior-verification" &&
       (isStrongDocumentWinner(standardWinner) ||
         (standardWinner.detection.confidence >= 0.82 &&
-          standardWinner.detection.areaRatio >= 0.20));
+          standardWinner.detection.areaRatio >= 0.20) ||
+        (priorCandidate !== null &&
+          standardWinner.detection.confidence >= 0.75));
 
     if (isPass1WinnerDecisive) {
       return {
@@ -1321,9 +1376,9 @@ export function runDocumentDetection(
       // gracefully fall through to standard/fallback candidates.
     }
 
-    // Pool candidates from standard and adaptive passes
+    // Pool candidates from standard, temporal prior, and adaptive passes
     const pooledCandidates = [
-      ...standardResult.candidates,
+      ...pass1Candidates,
       ...adaptiveCandidates,
     ];
 
@@ -1363,14 +1418,18 @@ export function runDocumentDetection(
           pooledWinner.detection.areaRatio >= 0.20));
 
     if (isDecisiveFullDocument) {
+      const isTemporalPrior =
+        pooledWinner.strategy === "temporal-prior-verification";
       return {
-        detection: refineDetection(
-          cv,
-          pooledWinner.detection,
-          currentEdgeMap,
-          grayscale,
-          config,
-        ),
+        detection: isTemporalPrior
+          ? pooledWinner.detection
+          : refineDetection(
+              cv,
+              pooledWinner.detection,
+              currentEdgeMap,
+              grayscale,
+              config,
+            ),
         contourCount: totalContourCount,
         quadrilateralCount: totalQuadrilateralCount,
         strategy: pooledWinner.strategy,
@@ -1611,14 +1670,18 @@ export function runDocumentDetection(
     }
 
     const finalDetection = finalWinner?.detection ?? null;
+    const isTemporalPrior =
+      finalWinner?.strategy === "temporal-prior-verification";
     const refinedFinal = finalDetection
-      ? refineDetection(
-          cv,
-          finalDetection,
-          { data: edges.data, width: frame.width, height: frame.height },
-          grayscale,
-          config,
-        )
+      ? isTemporalPrior
+        ? finalDetection
+        : refineDetection(
+            cv,
+            finalDetection,
+            { data: edges.data, width: frame.width, height: frame.height },
+            grayscale,
+            config,
+          )
       : null;
 
     return {
